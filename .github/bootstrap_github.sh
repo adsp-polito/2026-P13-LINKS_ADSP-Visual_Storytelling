@@ -15,9 +15,9 @@ OWNER="${REPO%%/*}"
 PROJECT_TITLE="${PROJECT_TITLE:-P13 Visual Storytelling – Team 10}"
 
 # Fill in GitHub usernames (without @). Leave empty to create unassigned issues.
-PARSA="${PARSA:-}"
-BEHRAD="${BEHRAD:-}"
-NIOOSHA="${NIOOSHA:-}"
+PARSA="${PARSA:-parsatimi}"
+BEHRAD="${BEHRAD:-behradkamyab}"
+NIOOSHA="${NIOOSHA:-NiooshaDe}"
 ALL="$(printf '%s,' "$PARSA" "$BEHRAD" "$NIOOSHA" | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
 CP2="CP2 – 2 Dec 2026"
