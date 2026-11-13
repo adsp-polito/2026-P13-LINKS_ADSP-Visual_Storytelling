@@ -1,0 +1,39 @@
+name: Experiment
+description: A zero-shot or fine-tuning run (E0, E1, …)
+labels: ["experiment"]
+body:
+  - type: input
+    id: exp_id
+    attributes:
+      label: Experiment id
+      placeholder: E2
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: What do we expect and why?
+    validations:
+      required: true
+  - type: input
+    id: config
+    attributes:
+      label: Config file
+      placeholder: configs/e2_lora_r32.yaml
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: Model size, 4-bit?, image side, batch × grad-accum, GPU, datasets / subset.
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Paste headline metrics (with CIs), W&B link, HF Hub adapter id, output paths.
+  - type: textarea
+    id: conclusion
+    attributes:
+      label: Conclusion / next step

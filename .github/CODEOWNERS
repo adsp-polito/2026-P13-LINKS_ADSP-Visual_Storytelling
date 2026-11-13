@@ -1,0 +1,26 @@
+# Each PR automatically requests a review from the owner of the files it touches.
+# TODO: replace the placeholder handles with real GitHub usernames.
+#   Parsa   = @TODO-parsa
+#   Behrad  = @TODO-behrad
+#   Nioosha = @TODO-nioosha
+
+# Default: whole team
+*                       @TODO-parsa @TODO-behrad @TODO-nioosha
+
+# Data (Parsa)
+/src/p13/data/          @TODO-parsa
+/data/                  @TODO-parsa
+/tests/test_vist.py     @TODO-parsa
+
+# Inference + training (Behrad)
+/src/p13/infer/         @TODO-behrad
+/src/p13/train/         @TODO-behrad
+/configs/               @TODO-behrad
+
+# Evaluation (Nioosha)
+/src/p13/eval/          @TODO-nioosha
+/report/                @TODO-nioosha
+
+# Shared contract – everyone reviews
+/src/p13/common/        @TODO-parsa @TODO-behrad @TODO-nioosha
+/pyproject.toml         @TODO-parsa @TODO-behrad @TODO-nioosha

@@ -1,0 +1,14 @@
+# Prompt registry. Generated stories record the prompt id (GeneratedStory.prompt_id).
+# Never edit the text of an existing id after results exist — add a new id instead.
+prompts:
+  P0:
+    description: Minimal prompt from the LINKS brief.
+    text: >-
+      Write a coherent story from this sequence of images.
+  P1:
+    description: P0 + length, person and grounding constraints.
+    text: >-
+      Write a coherent story from this sequence of images.
+      Write about one sentence per image, in the third person, 50–100 words in total.
+      Describe only what is visible in the images; do not invent names, dates, places
+      or objects.

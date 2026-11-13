@@ -1,0 +1,53 @@
+# --- Data: never commit images or raw dataset files (GDPR / licensing) ---
+data/raw/
+data/images/
+data/processed/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+# figures for the report are the one exception
+!report/figures/**/*.png
+!report/figures/**/*.pdf
+
+# --- Outputs: generated stories / scores stay local ---
+outputs/**
+!outputs/.gitkeep
+
+# --- Model weights & experiment tracking ---
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+checkpoints/
+wandb/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- OS / editors ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Local AI assistant context ---
+CLAUDE.md

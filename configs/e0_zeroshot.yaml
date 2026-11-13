@@ -1,0 +1,30 @@
+# E0 – zero-shot baseline (adapter OFF). Runs P0 and P1 on the dev-200 subset.
+# Full validation: --set data.subset=full
+experiment:
+  id: E0
+  name: zeroshot_2b
+  seed: 42
+
+model:
+  name: Qwen/Qwen3-VL-2B-Instruct
+  load_in_4bit: false          # true on a 6 GB GPU
+  dtype: bfloat16
+  adapter: null                # zero-shot: no adapter
+
+data:
+  datasets: [vist, vwp, aesop]
+  split: val
+  max_image_side: 448
+  subset: dev200
+
+prompt:
+  ids: [P0, P1]
+
+generation:
+  max_new_tokens: 256
+  do_sample: false
+  batch_size: 1
+  backend: transformers
+
+logging:
+  wandb: false

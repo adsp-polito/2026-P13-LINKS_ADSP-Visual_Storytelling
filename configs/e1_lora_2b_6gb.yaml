@@ -1,0 +1,45 @@
+# E1 – first adaptation run, sized for a ~6 GB laptop GPU.
+# QLoRA: base model frozen + 4-bit, only LoRA adapters train. Trained on VIST SIS.
+experiment:
+  id: E1
+  name: lora_2b_6gb
+  seed: 42
+
+model:
+  name: Qwen/Qwen3-VL-2B-Instruct
+  load_in_4bit: true
+  dtype: bfloat16             # use float16 if the GPU has no bf16 support
+  attn_implementation: sdpa
+
+data:
+  datasets: [vist]
+  split: val                  # used for generation after training
+  max_image_side: 448         # lower to 336 if you hit OOM
+  subset: dev200
+
+prompt:
+  ids: [P1]
+  train_id: P1
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  train_vision_tower: false
+
+train:
+  per_device_batch_size: 1
+  grad_accum: 16              # effective batch 16
+  learning_rate: 2.0e-4
+  epochs: 1
+  gradient_checkpointing: true
+  max_seq_len: 2048
+
+logging:
+  wandb: false
+
+hub:
+  push_adapter: false         # set true + repo_id to upload (always private)
+  repo_id: null
+  private: true

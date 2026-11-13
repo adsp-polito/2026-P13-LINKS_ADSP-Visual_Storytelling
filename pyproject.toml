@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "p13"
+version = "0.1.0"
+description = "Efficient adaptation of multimodal LLMs for grounded visual storytelling (ADSP P13, LINKS / NARRATIA)."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11,<3.12"
+authors = [{ name = "ADSP 2026/27 Team 10 (Nioosha, Behrad, Parsa)" }]
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "pillow>=10.3",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# GPU stack for zero-shot generation and LoRA/QLoRA training.
+train = [
+    "torch>=2.4",
+    "transformers>=4.57",
+    "peft>=0.17",
+    "trl>=0.23",
+    "accelerate>=1.0",
+    "bitsandbytes>=0.45; sys_platform != 'darwin'",
+    "qwen-vl-utils>=0.0.14",
+    "huggingface_hub>=0.34",
+    "wandb>=0.19",
+]
+eval = [
+    "evaluate>=0.4",
+    "nltk>=3.9",
+    "pycocoevalcap>=1.2",
+    "bert-score>=0.3.13",
+    "torchmetrics[multimodal]>=1.4",
+    "spacy>=3.7",
+    "scipy>=1.13",
+    "pandas>=2.2",
+]
+vllm = ["vllm>=0.11"]
+dev = ["ruff>=0.8", "pytest>=8.3", "pre-commit>=4.0"]
+
+[project.scripts]
+p13-prepare = "p13.cli:prepare_main"
+p13-generate = "p13.cli:generate_main"
+p13-train = "p13.cli:train_main"
+p13-eval = "p13.cli:eval_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/p13"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # allow typographic dashes/quotes in text
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

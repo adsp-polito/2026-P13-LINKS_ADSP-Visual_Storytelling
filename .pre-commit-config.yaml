@@ -1,0 +1,40 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+        exclude: ^LINKS_ADSP-Visual_Storytelling\.pdf$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # GDPR / licensing: dataset images must never be committed.
+      - id: no-images
+        name: "Block image files (dataset images must not be committed)"
+        language: fail
+        entry: "Image files must not be committed (GDPR/licensing). Put figures in report/figures/ only."
+        files: '(?i)\.(jpe?g|png|gif|webp|bmp|tiff?)$'
+        exclude: ^report/figures/
+      - id: no-raw-data
+        name: "Block raw data / images / outputs directories"
+        language: fail
+        entry: "Files under data/raw, data/images, data/processed or outputs/ must not be committed."
+        files: ^(data/(raw|images|processed)/|outputs/(?!\.gitkeep$))
+      - id: no-weights-or-env
+        name: "Block model weights and .env"
+        language: fail
+        entry: "Model weights and .env files must not be committed (adapters go to the HF Hub)."
+        files: '(\.safetensors|\.ckpt|\.pt|(^|/)\.env)$'
