@@ -10,6 +10,7 @@ from p13.common.jsonl import read_jsonl
 from p13.common.schema import StoryRecord
 from p13.common.subset import read_ids
 from p13.data.vist import (
+    DROP_REASONS,
     RawStory,
     build_records,
     group_sis,
@@ -83,7 +84,7 @@ def test_per_photo_text_keeps_first_description_per_photo(tmp_path):
 
 # ---------------------------------------------------------------- build_records / prepare
 
-_NO_DROPS = {"bad_length": 0, "empty_story": 0, "missing_image": 0, "broken_image": 0}
+_NO_DROPS = dict.fromkeys(DROP_REASONS, 0)
 _STORIES = {
     "s1": ["s1_1", "s1_2", "s1_3"],
     "s2": ["s2_1", "s2_2", "s2_3"],
@@ -166,6 +167,39 @@ def test_build_records_descriptions_are_all_or_nothing(tmp_path):
     )
 
     assert records[0].dii == []
+
+
+def test_build_records_drops_stories_with_empty_sentences(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    for pid in ["e1", "e2", "e3", "f1", "f2", "f3"]:
+        _make_image(raw, pid)
+    stories = [
+        RawStory("E", ["e1", "e2", "e3"], ["hi .", "", "bye ."]),  # one empty sentence
+        RawStory("F", ["f1", "f2", "f3"], ["", "", ""]),  # no text at all
+    ]
+
+    records, drops = build_records(
+        stories, split="val", raw_image_dir=raw, out_image_dir=out, max_image_side=448
+    )
+
+    assert records == []
+    assert drops == {**_NO_DROPS, "empty_story": 1, "empty_sentence": 1}
+    assert not out.exists()  # nothing is resized for dropped stories
+
+
+def test_build_records_counts_missing_before_broken(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    _make_image(raw, "m1")
+    _make_image(raw, "m3")
+    (raw / "m1.jpg").write_bytes(b"not an image")  # broken, and it comes first
+    stories = [_story("M", ["m1", "m2", "m3"])]  # m2 is missing
+
+    records, drops = build_records(
+        stories, split="val", raw_image_dir=raw, out_image_dir=out, max_image_side=448
+    )
+
+    assert records == []
+    assert drops == {**_NO_DROPS, "missing_image": 1}
 
 
 def _write_split(root: Path, split: str) -> None:

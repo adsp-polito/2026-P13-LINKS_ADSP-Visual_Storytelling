@@ -52,7 +52,7 @@ _PLACEHOLDER_RE = re.compile(r"\[(male|female|location|organization)\]", re.IGNO
 TEXT_FIELD = "text"
 
 # Why a whole story can be dropped (keys of the ``drop_counts`` dict).
-DROP_REASONS = ("bad_length", "empty_story", "missing_image", "broken_image")
+DROP_REASONS = ("bad_length", "empty_story", "empty_sentence", "missing_image", "broken_image")
 
 
 def rewrite_placeholders(text: str) -> str:
@@ -150,8 +150,9 @@ def build_records(
     """Steps 2–5: return ``(records, drop_counts)``; log how many stories were dropped and why.
 
     A story is dropped as a whole (``drop_counts`` says why) if it has a bad number of
-    photos, no text, or any photo that is missing or cannot be decoded. Images are only
-    resized for stories that are kept.
+    photos, no text, an empty sentence, or any photo that is missing or cannot be decoded.
+    If a story has both missing and broken photos, it counts as ``missing_image``.
+    Images are only resized for stories that are kept.
     """
     dii = dii or {}
     dis = dis or {}
@@ -174,14 +175,18 @@ def build_records(
         if not MIN_IMAGES <= len(story.photo_ids) <= MAX_IMAGES:
             drops["bad_length"] += 1
             continue
-        text = rewrite_placeholders(" ".join(s for s in story.sentences if s))
-        if not text.strip():
+        if not any(story.sentences):
             drops["empty_story"] += 1
             continue
+        if not all(story.sentences):
+            drops["empty_sentence"] += 1
+            continue
+        text = rewrite_placeholders(" ".join(story.sentences))
         checks = [check(pid) for pid in story.photo_ids]
-        failed = [c for c in checks if isinstance(c, str)]
+        failed = {c for c in checks if isinstance(c, str)}
         if failed:
-            drops[failed[0]] += 1
+            # "missing_image" wins: it means the download is incomplete (blocks dev-200 lists).
+            drops["missing_image" if "missing_image" in failed else "broken_image"] += 1
             continue
 
         images = []
