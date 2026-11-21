@@ -220,16 +220,26 @@ def build_records(
 def _ensure_dev_ids(
     cfg: ExperimentConfig, split: str, records: list[StoryRecord], drops: dict[str, int]
 ) -> None:
-    """Write the committed dev-subset id list once; never overwrite an existing one."""
+    """Write the committed dev-subset id list once; never overwrite an existing one.
+
+    Raises if an existing list names stories that were not built here, because eval
+    would then silently run on fewer stories than the committed subset.
+    """
     size = cfg.data.dev_subset_size
     path = subset_path(cfg.data.splits_dir, "vist", split, size)
     ids = {r.id for r in records}
     if path.exists():
         absent = [i for i in read_ids(path) if i not in ids]
         if absent:
-            log.warning("%s lists %d ids not built here (e.g. %s)", path, len(absent), absent[0])
+            raise RuntimeError(
+                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
+                f"check the {split} images (drop counts: {drops})"
+            )
         return
-    if not ids or drops["missing_image"]:
+    if not ids:
+        log.warning("not writing %s: no stories were built", path)
+        return
+    if drops["missing_image"]:
         log.warning(
             "not writing %s: %d stories lack images. Download all %s images first.",
             path,
@@ -242,29 +252,39 @@ def _ensure_dev_ids(
 
 
 def prepare(cfg: ExperimentConfig, split: str) -> Path:
-    """Run steps 1–6 for one split; return the written JSONL path."""
+    """Run steps 1–6 for one split; return the written JSONL path.
+
+    Fails (and writes nothing) if the split's raw image folder is missing or no story
+    could be built, so a bad run never replaces a good JSONL with an empty one.
+    """
     raw_dir = Path(cfg.data.raw_dir) / "vist"
     sis_path = raw_dir / "sis" / f"{split}.story-in-sequence.json"
     if not sis_path.is_file():
         raise FileNotFoundError(f"{sis_path} not found; see data/README.md to download VIST")
+    raw_image_dir = raw_dir / "images" / split
+    if not raw_image_dir.is_dir():
+        raise FileNotFoundError(
+            f"{raw_image_dir} not found; download the VIST {split} images first "
+            "(or run only the splits you have, e.g. --split val)"
+        )
     with sis_path.open(encoding="utf-8") as f:
         stories = group_sis(json.load(f))
 
     records, drops = build_records(
         stories,
         split=split,
-        raw_image_dir=raw_dir / "images" / split,
+        raw_image_dir=raw_image_dir,
         out_image_dir=Path(cfg.data.image_dir) / "vist" / split,
         max_image_side=cfg.data.max_image_side,
         dii=per_photo_text(raw_dir / "dii" / f"{split}.description-in-isolation.json"),
         dis=per_photo_text(raw_dir / "dis" / f"{split}.description-in-sequence.json"),
     )
-    if not records:
-        log.warning(
-            "VIST %s: no stories were built; is %s/images/%s complete?", split, raw_dir, split
-        )
-
     out_path = Path(cfg.data.jsonl_dir) / f"vist_{split}.jsonl"
+    if not records:
+        raise RuntimeError(
+            f"VIST {split}: no stories were built (dropped {drops}); "
+            f"is {raw_image_dir} complete? {out_path} was not changed."
+        )
     n = write_jsonl(out_path, records)
     log.info("VIST %s: wrote %d records to %s", split, n, out_path)
 

@@ -1,8 +1,10 @@
 """VIST tests: placeholder helper (Nioosha) and loader functions (Parsa)."""
 
 import json
+import shutil
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from p13.common.config import parse_config_dict
@@ -271,3 +273,37 @@ def test_prepare_train_writes_no_dev_ids(tmp_path):
     prepare(_cfg(tmp_path), "train")
 
     assert not (tmp_path / "splits").exists()
+
+
+def test_prepare_fails_if_committed_dev_ids_are_not_built(tmp_path):
+    _write_split(tmp_path, "val")
+    cfg = _cfg(tmp_path)
+    prepare(cfg, "val")  # writes the dev-2 id list
+    dev_id = sorted(read_ids(tmp_path / "splits" / "vist_val_dev2.txt"))[0]
+    raw_images = tmp_path / "raw" / "vist" / "images" / "val"
+    (raw_images / f"{_STORIES[dev_id][0]}.jpg").write_bytes(b"not an image")
+
+    with pytest.raises(RuntimeError, match="not built here"):
+        prepare(cfg, "val")
+
+
+def test_prepare_keeps_old_jsonl_when_nothing_is_built(tmp_path):
+    _write_split(tmp_path, "val")
+    cfg = _cfg(tmp_path)
+    out = prepare(cfg, "val")
+    before = out.read_text(encoding="utf-8")
+    for img in (tmp_path / "raw" / "vist" / "images" / "val").glob("*.jpg"):
+        img.unlink()
+
+    with pytest.raises(RuntimeError, match="no stories were built"):
+        prepare(cfg, "val")
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_prepare_fails_without_image_folder(tmp_path):
+    _write_split(tmp_path, "train")
+    shutil.rmtree(tmp_path / "raw" / "vist" / "images" / "train")
+
+    with pytest.raises(FileNotFoundError, match="images first"):
+        prepare(_cfg(tmp_path), "train")
+    assert not (tmp_path / "processed").exists()
