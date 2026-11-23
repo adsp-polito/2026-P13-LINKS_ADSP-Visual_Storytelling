@@ -3,7 +3,7 @@
     p13-prepare  --config CFG [--split val|train|test|all]   raw datasets → unified JSONL
     p13-generate --config CFG                                stories (adapter OFF or ON)
     p13-train    --config CFG                                LoRA / QLoRA adapter
-    p13-eval     --config CFG --stories FILE [FILE ...]      metrics → scores CSV
+    p13-eval     --config CFG --stories FILE [FILE ...] [--with-human]   metrics → scores CSV
 
 Common flags: ``--set key.sub=value`` (repeatable) to override the config,
 ``--dry-run`` to print the resolved config and exit.
@@ -119,12 +119,17 @@ def _eval(cfg: ExperimentConfig, args: argparse.Namespace) -> None:
     for f in args.stories:
         n = validate_file(f, GeneratedStory)
         log.info("%s: %d valid generated stories", f, n)
-    evaluate(cfg, args.stories)
+    evaluate(cfg, args.stories, with_human=args.with_human)
 
 
 def eval_main(argv: list[str] | None = None) -> int:
     p = _parser("p13-eval", "Score generated stories (GeneratedStory JSONL).")
     p.add_argument("--stories", nargs="+", type=Path, required=True)
+    p.add_argument(
+        "--with-human",
+        action="store_true",
+        help='also score the reference stories as the human baseline (model="human")',
+    )
     return _run(p.parse_args(argv), "eval", _eval)
 
 

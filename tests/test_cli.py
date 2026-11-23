@@ -104,3 +104,12 @@ def test_eval_human_baseline_skips_reference_metrics(tmp_path, story_dict, gener
     assert row["model"] == "human"
     assert row["length"] != ""
     assert row["bleu4"] == ""
+
+
+def test_eval_with_human_flag_scores_the_references(tmp_path, story_dict, generated_dict):
+    path = _write_one(tmp_path, story_dict, generated_dict)
+    assert cli.eval_main([*_eval_args(tmp_path, path, "length"), "--with-human"]) == 0
+    (scores,) = (tmp_path / "outputs").glob("*/scores.csv")
+    with scores.open(encoding="utf-8", newline="") as f:
+        models = [row["model"] for row in csv.DictReader(f)]
+    assert sorted(models) == ["Qwen/Qwen3-VL-2B-Instruct", "human"]

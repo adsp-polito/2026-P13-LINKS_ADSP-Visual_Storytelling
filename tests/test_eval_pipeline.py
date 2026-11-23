@@ -336,3 +336,52 @@ def test_rovist_nr_single_sentence_or_empty_has_no_score(generated_dict):
 def test_rovist_nr_stays_in_unit_range(generated_dict):
     story = "the dog the dog the dog the dog. the dog the dog the dog."
     assert 0.0 <= _nr(generated_dict, story) <= 1.0
+
+
+def test_human_stories_copy_the_references(story_dict):
+    refs = {K1: StoryRecord.model_validate(story_dict)}
+    (h,) = metrics.human_stories([K1, K1], refs)
+    assert (h.model, h.adapter, h.prompt_id) == ("human", None, "reference")
+    assert h.key == K1 and h.story == story_dict["story"]
+
+
+def test_evaluate_with_human_adds_one_human_group(
+    tmp_path, story_dict, generated_dict, monkeypatch
+):
+    _refs(tmp_path, story_dict)
+    zero = _gens(tmp_path, generated_dict, "zero.jsonl", ids=("s1",))
+    lora = _gens(tmp_path, generated_dict, "lora.jsonl", adapter="outputs/E1/adapter")
+    called_for = []
+
+    def fake_bleu4(gens, refs):
+        called_for.extend(g.model for g in gens)
+        return {g.key: 0.5 for g in gens}
+
+    monkeypatch.setitem(metrics.METRICS, "bleu4", fake_bleu4)
+    cfg = _cfg(tmp_path, ["length", "bleu4"])
+    rows = _read_csv(evaluate(cfg, [zero, lora], with_human=True))
+
+    assert "human" not in called_for
+
+    human = [r for r in rows if r["model"] == "human"]
+    assert [r["id"] for r in human] == ["s1", "s2"]
+    assert {(r["adapter"], r["prompt_id"]) for r in human} == {("", "reference")}
+    assert float(human[0]["length"]) == 15.0
+    assert all(r["bleu4"] == "" for r in human)
+
+
+def test_evaluate_with_human_derives_dhm(tmp_path, story_dict, generated_dict, monkeypatch):
+    _refs(tmp_path, story_dict)
+    _fake_base_metrics(monkeypatch)
+    rows = _read_csv(
+        evaluate(_cfg(tmp_path, DHM_NAMES), [_gens(tmp_path, generated_dict)], with_human=True)
+    )
+    model = next(r for r in rows if r["model"] != "human")
+    assert float(model["dhm_g"]) == pytest.approx(0.14 - 0.15)
+
+
+def test_evaluate_with_human_refuses_human_story_files(tmp_path, story_dict, generated_dict):
+    _refs(tmp_path, story_dict)
+    files = [_gens(tmp_path, generated_dict), _human(tmp_path, generated_dict)]
+    with pytest.raises(ValueError, match="already contain model='human'"):
+        evaluate(_cfg(tmp_path, ["length"]), files, with_human=True)

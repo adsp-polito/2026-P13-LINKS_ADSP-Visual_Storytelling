@@ -5,7 +5,7 @@ import itertools
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeAlias
 
@@ -238,7 +238,27 @@ ID_COLUMNS = ("dataset", "split", "id", "model", "adapter", "prompt_id")
 GROUP_COLUMNS = ("dataset", "split", "model", "adapter", "prompt_id", "n_stories")
 
 
-def evaluate(cfg: ExperimentConfig, story_files: list[Path]) -> Path:
+def human_stories(keys: Iterable[Key], refs: Refs) -> list[GeneratedStory]:
+    """The human baseline: one ``model="human"`` story per key, its text = the reference story.
+
+    ``adapter`` is null and ``prompt_id`` is ``"reference"``, so the human stories form one
+    system per dataset split and go through the same pipeline as the model stories.
+    """
+    return [
+        GeneratedStory(
+            id=refs[key].id,
+            dataset=refs[key].dataset,
+            split=refs[key].split,
+            model=HUMAN_MODEL,
+            adapter=None,
+            prompt_id=HUMAN_PROMPT_ID,
+            story=refs[key].story,
+        )
+        for key in sorted(set(keys))
+    ]
+
+
+def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool = False) -> Path:
     """Run every metric in ``cfg.eval.metrics`` on the given GeneratedStory files.
 
     Steps:
@@ -252,6 +272,9 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path]) -> Path:
     3. Load the cleaned references from ``<jsonl_dir>/<dataset>_<split>.jsonl``. A story
        without a reference is an error: eval must never quietly run on fewer stories.
        The test split is refused unless ``eval.allow_test`` is true (final numbers only).
+       With ``with_human``, add the human baseline (:func:`human_stories`): one
+       ``model="human"`` group per dataset split, covering every story id of the model
+       groups there. The story files must then not contain ``model="human"`` stories.
     4. If ``dhm*`` is asked for, check (before any scoring) that ``groovist``, ``rovist_c``
        and ``rovist_nr`` are asked for too, and that every model group has exactly one
        ``model="human"`` group on the same dataset split covering all its story ids.
@@ -284,10 +307,12 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path]) -> Path:
             "refusing to score the test split: it stays untouched until the final numbers "
             "(set eval.allow_test=true for those)"
         )
-    human_of = _check_dhm_inputs(names, groups) if derived_names else {}
     refs = _load_refs(Path(cfg.data.jsonl_dir), dataset_splits)
     for group, gens in groups.items():
         _check_refs_exist(group, gens, refs)
+    if with_human:
+        groups = _add_human_groups(groups, refs)
+    human_of = _check_dhm_inputs(names, groups) if derived_names else {}
 
     all_scores: dict[Group, dict[str, Scores]] = {}
     for group, gens in groups.items():
@@ -365,6 +390,22 @@ def _check_metric_names(names: list[str]) -> list[str]:
             "(the report pools the share as sum(share × n_objects) / sum(n_objects))"
         )
     return list(names)
+
+
+def _add_human_groups(
+    groups: dict[Group, list[GeneratedStory]], refs: Refs
+) -> dict[Group, list[GeneratedStory]]:
+    if any(group[0] == HUMAN_MODEL for group in groups):
+        raise ValueError(
+            f"with_human: the story files already contain model={HUMAN_MODEL!r} stories; "
+            "pass either those files or --with-human, not both"
+        )
+    keys = [g.key for gens in groups.values() for g in gens]
+    humans = human_stories(keys, refs)
+    merged = dict(groups)
+    for h in humans:
+        merged.setdefault(_group_of(h), []).append(h)
+    return dict(sorted(merged.items(), key=lambda kv: _group_label(kv[0])))
 
 
 def _check_dhm_inputs(
@@ -492,6 +533,7 @@ CORPUS_METRICS: dict[str, Callable[[list[GeneratedStory]], float]] = {
 }
 
 HUMAN_MODEL = "human"
+HUMAN_PROMPT_ID = "reference"
 
 REFERENCE_METRICS: frozenset[str] = frozenset(
     {"dhm_g", "dhm_c", "dhm_nr", "dhm", "bleu4", "meteor", "cider", "rouge_l", "bertscore"}
