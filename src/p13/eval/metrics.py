@@ -27,6 +27,36 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall(text.lower())
 
 
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+NR_BLOCK = 4
+
+
+def _sentences(text: str) -> list[list[str]]:
+    sentences = (_words(s) for s in _SENTENCE_END_RE.split(text.strip()))
+    return [s for s in sentences if s]
+
+
+def _jaccard(a: list[str], b: list[str]) -> float:
+    sa, sb = set(a), set(b)
+    return len(sa & sb) / len(sa | sb)
+
+
+def _non_redundancy(text: str) -> float:
+    sentences = _sentences(text)
+    if len(sentences) < 2:
+        return math.nan
+    between = [_jaccard(a, b) for a, b in itertools.combinations(sentences, 2)]
+    within = [
+        _jaccard(s[i : i + NR_BLOCK], s[i + NR_BLOCK : i + 2 * NR_BLOCK])
+        for s in sentences
+        for i in range(0, len(s) - NR_BLOCK, NR_BLOCK)
+    ]
+    parts = [sum(between) / len(between)]
+    if within:
+        parts.append(sum(within) / len(within))
+    return 1 - sum(parts) / len(parts)
+
+
 def _todo(name: str) -> NotImplementedError:
     return NotImplementedError(f"metric {name!r} not implemented yet (Nioosha)")
 
@@ -53,9 +83,24 @@ def rovist_c(gens: list[GeneratedStory], refs: Refs) -> Scores:
 
 
 def rovist_nr(gens: list[GeneratedStory], refs: Refs) -> Scores:
-    """RoViST-NR: non-redundancy from Jaccard word overlap within and between sentences.
-    Higher = less repetition. Reference-free."""
-    raise _todo("rovist_nr")
+    """RoViST-NR: non-redundancy in [0, 1]; higher = less repetition. Reference-free.
+
+    Clean version of RoViST's idea (not a copy of the authors' code): words are lower-cased
+    with punctuation ignored, as in ``length``; overlap is set-based Jaccard.
+
+    * Between sentences: mean Jaccard over all pairs of sentences.
+    * Within a sentence: mean Jaccard between consecutive blocks of ``NR_BLOCK`` (4) words.
+    * NR = 1 − mean(between, within); only the between part if no sentence has two blocks.
+
+    Sentences end at ``.``, ``!`` or ``?`` followed by a space. A story with fewer than two
+    sentences gets no score (empty cell).
+    """
+    scores: Scores = {}
+    for g in gens:
+        value = _non_redundancy(g.story)
+        if not math.isnan(value):
+            scores[g.key] = value
+    return scores
 
 
 DHM_GAPS: dict[str, str] = {"dhm_g": "groovist", "dhm_c": "rovist_c", "dhm_nr": "rovist_nr"}

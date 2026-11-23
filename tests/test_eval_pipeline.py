@@ -300,3 +300,39 @@ def test_evaluate_dhm_fails_if_human_misses_a_story(
 def test_evaluate_halluc_obj_share_needs_n_objects(tmp_path):
     with pytest.raises(ValueError, match="halluc_obj_share needs n_objects"):
         evaluate(_cfg(tmp_path, ["length", "halluc_obj_share"]), [tmp_path / "none.jsonl"])
+
+
+def _nr(generated_dict, story):
+    return metrics.rovist_nr([_g(generated_dict, story)], {}).get(("vist", "val", "s1"))
+
+
+def test_rovist_nr_no_repetition_scores_one(generated_dict):
+    assert _nr(generated_dict, "A dog runs. The cat sleeps.") == 1.0
+
+
+def test_rovist_nr_repeated_sentences(generated_dict):
+    assert _nr(generated_dict, "A dog runs. A dog runs.") == 0.0
+    assert _nr(generated_dict, "a dog ran . a cat ran .") == pytest.approx(1 - 2 / 4)
+
+
+def test_rovist_nr_ignores_case_and_punctuation(generated_dict):
+    assert _nr(generated_dict, "The dog ran! THE DOG RAN?") == _nr(
+        generated_dict, "the dog ran . the dog ran ."
+    )
+
+
+def test_rovist_nr_within_sentence_blocks(generated_dict):
+    story = "one two three four one two three four. Something else."
+    between = 0.0
+    within = 1.0
+    assert _nr(generated_dict, story) == pytest.approx(1 - (between + within) / 2)
+
+
+def test_rovist_nr_single_sentence_or_empty_has_no_score(generated_dict):
+    assert _nr(generated_dict, "Just one sentence about a dog.") is None
+    assert _nr(generated_dict, "") is None
+
+
+def test_rovist_nr_stays_in_unit_range(generated_dict):
+    story = "the dog the dog the dog the dog. the dog the dog the dog."
+    assert 0.0 <= _nr(generated_dict, story) <= 1.0
