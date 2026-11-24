@@ -339,6 +339,41 @@ def test_rovist_nr_short_sentences_have_no_within_part(generated_dict):
     assert _nr(generated_dict, story) == pytest.approx(1 - between)
 
 
+def test_sentences_split_after_closing_quotes_and_brackets():
+    text = (
+        'He yelled "ROCK SHOWING!" Next came the crowd. (They cheered.) Then \u201cgo.\u201d End.'
+    )
+    assert metrics._sentences(text) == [
+        ["he", "yelled", "rock", "showing"],
+        ["next", "came", "the", "crowd"],
+        ["they", "cheered"],
+        ["then", "go"],
+        ["end"],
+    ]
+
+
+def test_rovist_nr_quoted_dialogue_counts_as_sentences(generated_dict):
+    assert _nr(generated_dict, '"A dog runs!" A dog runs.') == 0.0
+
+
+def test_write_csv_removes_tmp_file_on_failure(tmp_path):
+    out = tmp_path / "scores.csv"
+    with pytest.raises(ValueError):
+        metrics._write_csv(out, ["a"], [{"a": 1, "b": 2}])
+    assert not out.exists()
+    assert not (tmp_path / "scores.csv.tmp").exists()
+
+
+def test_evaluate_warns_when_replacing_scores(tmp_path, story_dict, generated_dict, caplog):
+    _refs(tmp_path, story_dict)
+    gens = _gens(tmp_path, generated_dict)
+    cfg = _cfg(tmp_path, ["length"])
+    evaluate(cfg, [gens])
+    assert "replacing" not in caplog.text
+    evaluate(cfg, [gens])
+    assert "replacing" in caplog.text
+
+
 def test_rovist_nr_single_sentence_or_empty_has_no_score(generated_dict):
     assert _nr(generated_dict, "Just one sentence about a dog.") is None
     assert _nr(generated_dict, "") is None

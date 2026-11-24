@@ -112,19 +112,20 @@ def train_main(argv: list[str] | None = None) -> int:
 
 
 def _eval(cfg: ExperimentConfig, args: argparse.Namespace) -> None:
-    from p13.common.jsonl import validate_file
-    from p13.common.schema import GeneratedStory
     from p13.eval.metrics import evaluate
 
-    for f in args.stories:
-        n = validate_file(f, GeneratedStory)
-        log.info("%s: %d valid generated stories", f, n)
     evaluate(cfg, args.stories, with_human=args.with_human)
 
 
 def eval_main(argv: list[str] | None = None) -> int:
     p = _parser("p13-eval", "Score generated stories (GeneratedStory JSONL).")
-    p.add_argument("--stories", nargs="+", type=Path, required=True)
+    p.add_argument(
+        "--stories",
+        nargs="+",
+        type=Path,
+        required=True,
+        help="every story file of the experiment in one call: each run replaces scores.csv",
+    )
     p.add_argument(
         "--with-human",
         action="store_true",

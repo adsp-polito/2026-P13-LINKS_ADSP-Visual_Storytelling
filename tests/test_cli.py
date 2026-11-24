@@ -113,3 +113,9 @@ def test_eval_with_human_flag_scores_the_references(tmp_path, story_dict, genera
     with scores.open(encoding="utf-8", newline="") as f:
         models = [row["model"] for row in csv.DictReader(f)]
     assert sorted(models) == ["Qwen/Qwen3-VL-2B-Instruct", "human"]
+
+
+def test_eval_checks_metric_names_before_reading_stories(tmp_path):
+    missing = tmp_path / "missing.jsonl"
+    with pytest.raises(ValueError, match="unknown metric"):
+        cli.eval_main(_eval_args(tmp_path, missing, "length,nope"))

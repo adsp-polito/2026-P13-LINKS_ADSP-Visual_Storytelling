@@ -27,7 +27,7 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall(text.lower())
 
 
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])[\"'”’)\]]*\s+")
 NR_BLOCK = 4
 
 
@@ -92,7 +92,8 @@ def rovist_nr(gens: list[GeneratedStory], refs: Refs) -> Scores:
     * Within a sentence: mean Jaccard between consecutive blocks of ``NR_BLOCK`` (4) words.
     * NR = 1 − mean(between, within); only the between part if no sentence has two blocks.
 
-    Sentences end at ``.``, ``!`` or ``?`` followed by a space. A story with fewer than two
+    Sentences end at ``.``, ``!`` or ``?`` followed by a space, with any closing quotes or
+    brackets in between (``"Stop!" Next`` is two sentences). A story with fewer than two
     sentences gets no score (empty cell).
     """
     scores: Scores = {}
@@ -287,7 +288,8 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool
     7. Write ``cfg.run_dir / "scores.csv"``: one row per (system, story), columns
        :data:`ID_COLUMNS` + one per per-story metric. An empty cell means the metric gave no
        score for that story (e.g. a reference-based metric for ``model="human"``);
-       ``adapter`` is empty for zero-shot.
+       ``adapter`` is empty for zero-shot. Each run replaces ``scores.csv``, so pass every
+       story file of the experiment (e.g. VIST and VWP) in one call.
     8. If corpus-level metrics (:data:`CORPUS_METRICS`, e.g. distinct-2) were asked for,
        also write ``cfg.run_dir / "system_scores.csv"``: one row per group,
        :data:`GROUP_COLUMNS` + one column per corpus metric. Otherwise an old
@@ -360,6 +362,10 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool
             group_rows.append(group_row)
 
     out = cfg.run_dir / "scores.csv"
+    if out.exists():
+        log.warning(
+            "replacing %s: pass every story file of this experiment in one p13-eval call", out
+        )
     _write_csv(out, [*ID_COLUMNS, *story_names], rows)
     log.info("wrote %d rows (%d groups) to %s", len(rows), len(groups), out)
     group_out = cfg.run_dir / "system_scores.csv"
@@ -460,7 +466,9 @@ def _group_stories(story_files: list[Path]) -> dict[Group, list[GeneratedStory]]
     """Read every file; return stories per group in a stable order (sorted by key)."""
     groups: dict[Group, dict[Key, GeneratedStory]] = {}
     for path in story_files:
-        for g in read_jsonl(path, GeneratedStory):
+        file_stories = read_jsonl(path, GeneratedStory)
+        log.info("%s: %d valid generated stories", path, len(file_stories))
+        for g in file_stories:
             stories = groups.setdefault(_group_of(g), {})
             if g.key in stories:
                 raise ValueError(
@@ -502,11 +510,15 @@ def _write_csv(path: Path, columns: list[str], rows: list[dict[str, object]]) ->
     """Write to ``<path>.tmp`` then rename, so a crash never leaves a half-written CSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-    tmp.replace(path)
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(rows)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 METRICS: dict[str, Callable[[list[GeneratedStory], Refs], Scores]] = {
