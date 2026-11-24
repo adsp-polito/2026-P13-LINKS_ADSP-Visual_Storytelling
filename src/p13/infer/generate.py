@@ -8,11 +8,11 @@ Owner: Behrad. The same code path serves:
 Design highlights:
 
 * Pure helpers (:func:`load_split_records`, :func:`build_messages`, :func:`clean_story_text`,
-  :func:`build_gen_kwargs`, :func:`gen_config_dict`, :func:`load_existing_stories`) have no
-  ``torch`` dependency so they run in CPU-only CI.
-* :func:`generate` supports incremental checkpointing and resume via :func:`write_jsonl`,
-  batched generation (``cfg.generation.batch_size``), and lazy model loading (if all output
-  files are already complete on resume, no model weights are loaded).
+  :func:`build_gen_kwargs`, :func:`gen_config_dict`, :func:`is_truncated`,
+  :func:`load_existing_stories`) have no ``torch`` dependency so they run in CPU-only CI.
+* :func:`generate` validates existing output settings before resuming, warns when any story
+  hits ``max_new_tokens`` without an EOS token, supports batched generation, and skips
+  loading model weights if all output files are already complete.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import contextlib
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -114,11 +114,68 @@ def gen_config_dict(cfg: ExperimentConfig) -> dict[str, Any]:
     }
 
 
-def load_existing_stories(out_path: Path) -> list[GeneratedStory]:
-    """Load already-generated stories from ``out_path`` if it exists (for resume)."""
+def is_truncated(
+    token_ids: Sequence[int],
+    max_new_tokens: int,
+    eos_ids: set[int],
+    pad_id: int | None = None,
+) -> bool:
+    """True if generation hit ``max_new_tokens`` without ending on an EOS token."""
+    toks = list(token_ids)
+    if pad_id is not None and pad_id not in eos_ids:
+        while toks and toks[-1] == pad_id:
+            toks.pop()
+    if len(toks) < max_new_tokens:
+        return False
+    return not (eos_ids and toks[-1] in eos_ids)
+
+
+def _stop_token_ids(model: Any, processor: Any) -> tuple[set[int], int | None]:
+    """Extract EOS token IDs and pad token ID from ``model`` and ``processor``."""
+    eos_ids: set[int] = set()
+    gen_cfg = getattr(model, "generation_config", None)
+    tokenizer = getattr(processor, "tokenizer", None)
+    for raw in (getattr(gen_cfg, "eos_token_id", None), getattr(tokenizer, "eos_token_id", None)):
+        if isinstance(raw, int):
+            eos_ids.add(raw)
+        elif isinstance(raw, Iterable):
+            eos_ids.update(int(x) for x in raw)
+
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = getattr(gen_cfg, "pad_token_id", None)
+    return eos_ids, int(pad_id) if isinstance(pad_id, int) else None
+
+
+def load_existing_stories(
+    out_path: Path,
+    *,
+    dataset: str,
+    split: str,
+    model_name: str,
+    adapter: str | None,
+    prompt_id: str,
+    expected_gen_config: dict[str, Any],
+) -> list[GeneratedStory]:
+    """Load already-generated stories from ``out_path`` and verify settings match ``cfg``.
+
+    Raises :class:`RuntimeError` if any existing story was produced with a different model,
+    adapter, prompt, dataset/split, or ``gen_config`` (for example ``max_new_tokens``).
+    """
     if not out_path.is_file():
         return []
     existing = read_jsonl(out_path, GeneratedStory)
+    expected = (dataset, split, model_name, adapter, prompt_id, expected_gen_config)
+    for s in existing:
+        actual = (s.dataset, s.split, s.model, s.adapter, s.prompt_id, s.gen_config)
+        if actual != expected:
+            raise RuntimeError(
+                f"cannot resume {out_path} (story id={s.id!r}): existing settings "
+                f"(model={s.model!r}, adapter={s.adapter!r}, prompt_id={s.prompt_id!r}, "
+                f"gen_config={s.gen_config}) do not match current config "
+                f"(model={model_name!r}, adapter={adapter!r}, prompt_id={prompt_id!r}, "
+                f"gen_config={expected_gen_config}); use a new experiment.name or delete {out_path}"
+            )
     log.info("resuming %s: %d stories already generated", out_path, len(existing))
     return existing
 
@@ -146,7 +203,9 @@ def _run_batch(
     model: Any,
     processor: Any,
     gen_kwargs: dict[str, Any],
-) -> tuple[list[str], int]:
+    eos_ids: set[int],
+    pad_id: int | None,
+) -> tuple[list[str], list[bool], int]:
     """Run one batch of stories through ``processor`` and ``model.generate``."""
     texts: list[str] = []
     flat_images: list[Image.Image] = []
@@ -174,11 +233,21 @@ def _run_batch(
     with _inference_context():
         output_ids = model.generate(**inputs, **gen_kwargs)
 
+    max_new_tokens = int(gen_kwargs["max_new_tokens"])
     new_tokens = [out[input_len:] for out in output_ids]
+    truncated = [
+        is_truncated(
+            tok.tolist() if hasattr(tok, "tolist") else list(tok),
+            max_new_tokens,
+            eos_ids,
+            pad_id,
+        )
+        for tok in new_tokens
+    ]
     decoded = processor.batch_decode(
         new_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )
-    return [clean_story_text(text) for text in decoded], total_input_tokens
+    return [clean_story_text(text) for text in decoded], truncated, total_input_tokens
 
 
 def generate(
@@ -203,6 +272,8 @@ def generate(
 
     model: Any = None
     processor: Any = None
+    eos_ids: set[int] = set()
+    pad_id: int | None = None
     written_files: list[Path] = []
 
     for dataset in cfg.data.datasets:
@@ -210,7 +281,15 @@ def generate(
         for pid in cfg.prompt.ids:
             prompt_text = get_prompt(pid, cfg.prompt.file)
             out_path = cfg.run_dir / f"stories_{dataset}_{cfg.data.split}_{pid}.jsonl"
-            existing = load_existing_stories(out_path)
+            existing = load_existing_stories(
+                out_path,
+                dataset=dataset,
+                split=cfg.data.split,
+                model_name=cfg.model.name,
+                adapter=cfg.model.adapter,
+                prompt_id=pid,
+                expected_gen_config=meta_gen_cfg,
+            )
             done_ids = {s.id for s in existing}
             pending = [r for r in records if r.id not in done_ids]
 
@@ -228,8 +307,10 @@ def generate(
 
             if model is None:
                 model, processor = loader(cfg)
+                eos_ids, pad_id = _stop_token_ids(model, processor)
 
             outputs: list[GeneratedStory] = list(existing)
+            truncated_ids: list[str] = []
             new_since_save = 0
             total_tokens = 0
             t0 = time.perf_counter()
@@ -240,9 +321,13 @@ def generate(
                 leave=False,
             ):
                 batch = pending[start : start + batch_size]
-                stories, batch_tokens = _run_batch(batch, prompt_text, model, processor, gen_kwargs)
+                stories, batch_trunc, batch_tokens = _run_batch(
+                    batch, prompt_text, model, processor, gen_kwargs, eos_ids, pad_id
+                )
                 total_tokens += batch_tokens
-                for rec, story_text in zip(batch, stories, strict=True):
+                for rec, story_text, was_trunc in zip(batch, stories, batch_trunc, strict=True):
+                    if was_trunc:
+                        truncated_ids.append(rec.id)
                     outputs.append(
                         GeneratedStory(
                             id=rec.id,
@@ -277,6 +362,18 @@ def generate(
                 elapsed / n_new,
                 avg_tokens,
             )
+            if truncated_ids:
+                log.warning(
+                    "%s/%s/%s: %d/%d stories hit max_new_tokens=%d without EOS and may be "
+                    "truncated (e.g. id=%s); consider raising generation.max_new_tokens",
+                    dataset,
+                    cfg.data.split,
+                    pid,
+                    len(truncated_ids),
+                    n_new,
+                    cfg.generation.max_new_tokens,
+                    truncated_ids[0],
+                )
             _log_peak_vram()
             written_files.append(out_path)
 

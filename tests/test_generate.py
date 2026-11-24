@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -17,8 +19,12 @@ from p13.infer.generate import (
     clean_story_text,
     gen_config_dict,
     generate,
+    is_truncated,
     load_split_records,
 )
+
+_EOS_ID = 999
+_PAD_ID = 0
 
 
 def _make_images(root: Path, names: list[str]) -> list[str]:
@@ -37,6 +43,7 @@ def _write_fixture_split(
     *,
     story_ids: list[str] = ("s1", "s2", "s3"),
     dev_ids: list[str] | None = ("s3", "s1"),
+    max_new_tokens: int = 32,
 ) -> ExperimentConfig:
     records = [
         StoryRecord(
@@ -72,7 +79,7 @@ def _write_fixture_split(
                 "max_image_side": 448,
             },
             "prompt": {"file": str(prompts_file), "ids": ["P0", "P1"]},
-            "generation": {"max_new_tokens": 32, "do_sample": False, "batch_size": 1},
+            "generation": {"max_new_tokens": max_new_tokens, "do_sample": False, "batch_size": 1},
             "output": {"dir": str(root / "outputs")},
         }
     )
@@ -100,6 +107,7 @@ class _FakeBatchInputs(dict):
 class _FakeProcessor:
     def __init__(self):
         self.calls: list[tuple[list[str], int]] = []
+        self.tokenizer = SimpleNamespace(eos_token_id=_EOS_ID, pad_token_id=_PAD_ID)
 
     def apply_chat_template(self, messages, *, tokenize=False, add_generation_prompt=True) -> str:
         assert not tokenize and add_generation_prompt
@@ -113,24 +121,30 @@ class _FakeProcessor:
         return _FakeBatchInputs({"input_ids": _FakeTensor([[10, 11, 12] for _ in text])})
 
     def batch_decode(self, token_batches, *, skip_special_tokens=True, **kwargs) -> list[str]:
-        return [
-            f"<think>internal plan</think>  Generated story #{toks[-1]} .  "
-            for toks in token_batches
-        ]
+        decoded: list[str] = []
+        for toks in token_batches:
+            core = [t for t in toks if t not in (_EOS_ID, _PAD_ID)]
+            decoded.append(f"<think>internal plan</think>  Generated story #{core[-1]} .  ")
+        return decoded
 
 
 class _FakeModel:
     device = "cpu"
 
-    def __init__(self):
+    def __init__(self, *, truncate: bool = False):
         self.step = 0
+        self.truncate = truncate
+        self.generation_config = SimpleNamespace(eos_token_id=[_EOS_ID], pad_token_id=_PAD_ID)
 
     def generate(self, **kwargs):
         input_ids: _FakeTensor = kwargs["input_ids"]
+        max_new = int(kwargs["max_new_tokens"])
         out = []
         for row in input_ids.rows:
             self.step += 1
-            out.append([*row, 100 + self.step])
+            tok = 100 + self.step
+            gen = [tok] * max_new if self.truncate else [tok, _EOS_ID]
+            out.append([*row, *gen])
         return out
 
 
@@ -178,7 +192,24 @@ def test_build_gen_kwargs_respects_do_sample(tmp_path):
     assert gen_config_dict(cfg_greedy)["seed"] == 42
 
 
-def test_generate_writes_validated_stories_for_all_prompts(tmp_path):
+def test_is_truncated_handles_eos_and_padding():
+    eos = {_EOS_ID}
+    assert not is_truncated([1, 2, _EOS_ID], max_new_tokens=5, eos_ids=eos, pad_id=_PAD_ID)
+    # Padded out to max_new_tokens in a batch after hitting EOS early -> not truncated.
+    assert not is_truncated(
+        [1, 2, _EOS_ID, _PAD_ID, _PAD_ID], max_new_tokens=5, eos_ids=eos, pad_id=_PAD_ID
+    )
+    # Finished with EOS right on the max_new_tokens step -> not truncated.
+    assert not is_truncated([1, 2, 3, 4, _EOS_ID], max_new_tokens=5, eos_ids=eos, pad_id=_PAD_ID)
+    # Also safe when pad_id == eos_id.
+    assert not is_truncated(
+        [1, 2, _EOS_ID, _EOS_ID, _EOS_ID], max_new_tokens=5, eos_ids=eos, pad_id=_EOS_ID
+    )
+    # Hit max_new_tokens without EOS -> truncated.
+    assert is_truncated([1, 2, 3, 4, 5], max_new_tokens=5, eos_ids=eos, pad_id=_PAD_ID)
+
+
+def test_generate_writes_validated_stories_for_all_prompts(tmp_path, caplog):
     cfg = _write_fixture_split(tmp_path, story_ids=["s1", "s2", "s3"], dev_ids=["s3", "s1"])
     fake_model, fake_proc = _FakeModel(), _FakeProcessor()
     load_calls = 0
@@ -188,9 +219,11 @@ def test_generate_writes_validated_stories_for_all_prompts(tmp_path):
         load_calls += 1
         return fake_model, fake_proc
 
-    written = generate(cfg, loader=fake_loader, save_every=1)
+    with caplog.at_level(logging.WARNING):
+        written = generate(cfg, loader=fake_loader, save_every=1)
 
     assert load_calls == 1
+    assert "truncated" not in caplog.text
     assert len(written) == 2
     p0_rows = read_jsonl(written[0], GeneratedStory)
     p1_rows = read_jsonl(written[1], GeneratedStory)
@@ -201,6 +234,19 @@ def test_generate_writes_validated_stories_for_all_prompts(tmp_path):
     assert p0_rows[0].story == "Generated story #101 ."
     assert "<think>" not in p0_rows[0].story
     assert p0_rows[0].gen_config["seed"] == 42
+
+
+def test_generate_warns_when_story_hits_max_new_tokens_without_eos(tmp_path, caplog):
+    cfg = _write_fixture_split(
+        tmp_path, story_ids=["s1", "s2"], dev_ids=["s1", "s2"], max_new_tokens=4
+    )
+    fake_model, fake_proc = _FakeModel(truncate=True), _FakeProcessor()
+
+    with caplog.at_level(logging.WARNING):
+        generate(cfg, loader=lambda _c: (fake_model, fake_proc))
+
+    assert "2/2 stories hit max_new_tokens=4 without EOS" in caplog.text
+    assert "id=s1" in caplog.text
 
 
 def test_generate_resumes_and_skips_completed_files_without_loading_model(tmp_path):
@@ -231,3 +277,32 @@ def test_generate_resumes_and_skips_completed_files_without_loading_model(tmp_pa
         raise AssertionError("loader should not be called when all stories already exist")
 
     generate(cfg, loader=fail_if_called)
+
+
+def test_generate_resume_rejects_changed_settings(tmp_path):
+    cfg_old = _write_fixture_split(
+        tmp_path, story_ids=["s1", "s2"], dev_ids=["s1", "s2"], max_new_tokens=32
+    )
+    p0_path = cfg_old.run_dir / "stories_vist_val_P0.jsonl"
+    write_jsonl(
+        p0_path,
+        [
+            GeneratedStory(
+                id="s1",
+                dataset="vist",
+                split="val",
+                model=cfg_old.model.name,
+                adapter=None,
+                prompt_id="P0",
+                story="Old 32-token story .",
+                gen_config=gen_config_dict(cfg_old),
+            )
+        ],
+    )
+
+    # Raising max_new_tokens (or changing model) without changing experiment.name must fail fast.
+    cfg_new = _write_fixture_split(
+        tmp_path, story_ids=["s1", "s2"], dev_ids=["s1", "s2"], max_new_tokens=64
+    )
+    with pytest.raises(RuntimeError, match="cannot resume"):
+        generate(cfg_new, loader=lambda _c: (_FakeModel(), _FakeProcessor()))
