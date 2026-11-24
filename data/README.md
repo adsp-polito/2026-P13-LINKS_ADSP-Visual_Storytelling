@@ -48,7 +48,11 @@ VWP stories are Apache-2.0; the movie shots belong to their copyright holders (s
 ## Pipeline
 
 ```bash
-bash data/download_vist.sh          # manual steps documented inside
-python data/download_vwp.py --split val   # CSV + shot images (needs the venv)
-p13-prepare --config configs/e0_zeroshot.yaml --split all
+bash data/download_vist.sh                  # manual steps documented inside
+python data/download_vwp.py --split val     # CSV + shot images (needs the venv)
+p13-prepare --config configs/e0_zeroshot.yaml --split val  --set "data.datasets=[vist,vwp]"
+p13-prepare --config configs/e0_zeroshot.yaml --split test --set "data.datasets=[vist]"
 ```
+
+Run one split at a time: `--split all` runs train first (it fails if the train images are not
+downloaded) and VWP refuses its blind test split.

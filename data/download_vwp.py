@@ -12,6 +12,7 @@ VWP images are movie frames: academic use only, never commit them (data/README.m
 from __future__ import annotations
 
 import argparse
+import http.client
 import os
 import sys
 import time
@@ -25,8 +26,17 @@ from p13.data.vwp import csv_name, image_urls, read_csv
 HF_URL = "https://huggingface.co/datasets/tonyhong/vwp/resolve/main/{name}"
 
 
+# Network errors worth a retry. URLError, HTTPError, timeouts and dropped connections are
+# OSError; a connection that drops mid-download raises http.client.IncompleteRead, which is
+# an HTTPException, not an OSError.
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
+
+
 def fetch(url: str, dst: Path, retries: int = 3, timeout: int = 60) -> None:
-    """Download ``url`` to ``dst`` via a temp file; retry a few times on network errors."""
+    """Download ``url`` to ``dst`` via a temp file; retry a few times on network errors.
+
+    If every try fails, the temp ``.part`` file is removed and the last error is raised.
+    """
     tmp = dst.with_name(dst.name + ".part")
     for attempt in range(1, retries + 1):
         try:
@@ -34,8 +44,9 @@ def fetch(url: str, dst: Path, retries: int = 3, timeout: int = 60) -> None:
                 tmp.write_bytes(response.read())
             os.replace(tmp, dst)
             return
-        except OSError:  # URLError, HTTPError and timeouts are all OSError
+        except NETWORK_ERRORS:
             if attempt == retries:
+                tmp.unlink(missing_ok=True)
                 raise
             time.sleep(2 * attempt)
 
@@ -45,8 +56,8 @@ def _download_image(job: tuple[str, str, Path]) -> str | None:
     key, url, dst = job
     try:
         fetch(url, dst)
-    except OSError as e:
-        print(f"  failed {key}: {e}", file=sys.stderr)
+    except NETWORK_ERRORS as e:
+        print(f"  failed {key}: {e!r}", file=sys.stderr)
         return key
     if not is_valid_image(dst):
         print(f"  failed {key}: downloaded file is not a valid image", file=sys.stderr)
