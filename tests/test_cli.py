@@ -29,11 +29,11 @@ def test_dry_run_prints_resolved_config(capsys):
 @pytest.mark.parametrize(
     "main,extra",
     [
-        (cli.generate_main, []),
+        (cli.generate_main, ["--set", "generation.backend=vllm"]),
         (cli.train_main, []),
         (cli.prepare_main, ["--set", "data.datasets=[aesop]"]),
     ],
-    ids=["generate", "train", "prepare-aesop"],
+    ids=["generate-vllm", "train", "prepare-aesop"],
 )
 def test_stubs_exit_cleanly(main, extra):
     assert main(["--config", "configs/e0_zeroshot.yaml", *extra]) == 2
