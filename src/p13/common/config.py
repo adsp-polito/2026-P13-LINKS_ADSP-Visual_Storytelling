@@ -111,8 +111,14 @@ class EvalSection:
             "groovist",
             "rovist_c",
             "rovist_nr",
+            "dhm_g",
+            "dhm_c",
+            "dhm_nr",
             "dhm",
-            "hallucination_rate",
+            "halluc_any",
+            "halluc_ner",
+            "halluc_obj_share",
+            "n_objects",
             # supporting
             "clipscore",
             "distinct_2",
@@ -132,6 +138,7 @@ class EvalSection:
     human_check_raters: int = 3
     bootstrap_samples: int = 1000
     ci_level: float = 0.95
+    allow_test: bool = False
 
 
 @dataclass
