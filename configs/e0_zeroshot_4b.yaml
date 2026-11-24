@@ -1,0 +1,30 @@
+# E0 – zero-shot baseline (adapter OFF) for a 24 GB GPU (e.g. Colab L4).
+# Uses Qwen3-VL-4B in full bfloat16 and raises max_new_tokens to 512 so P0 does not truncate.
+experiment:
+  id: E0
+  name: zeroshot_4b
+  seed: 42
+
+model:
+  name: Qwen/Qwen3-VL-4B-Instruct
+  load_in_4bit: false
+  dtype: bfloat16
+  adapter: null
+
+data:
+  datasets: [vist, vwp, aesop]
+  split: val
+  max_image_side: 448
+  subset: dev200
+
+prompt:
+  ids: [P0, P1]
+
+generation:
+  max_new_tokens: 512
+  do_sample: false
+  batch_size: 1
+  backend: transformers
+
+logging:
+  wandb: false
