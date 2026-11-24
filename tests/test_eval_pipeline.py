@@ -328,6 +328,17 @@ def test_rovist_nr_within_sentence_blocks(generated_dict):
     assert _nr(generated_dict, story) == pytest.approx(1 - (between + within) / 2)
 
 
+def test_rovist_nr_ignores_trailing_partial_block(generated_dict):
+    story = "a b c d a b c d x. Something else."
+    assert _nr(generated_dict, story) == pytest.approx(1 - (0.0 + 1.0) / 2)
+
+
+def test_rovist_nr_short_sentences_have_no_within_part(generated_dict):
+    story = "a b c d a. Something else."
+    between = 0.0
+    assert _nr(generated_dict, story) == pytest.approx(1 - between)
+
+
 def test_rovist_nr_single_sentence_or_empty_has_no_score(generated_dict):
     assert _nr(generated_dict, "Just one sentence about a dog.") is None
     assert _nr(generated_dict, "") is None

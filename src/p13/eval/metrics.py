@@ -49,7 +49,7 @@ def _non_redundancy(text: str) -> float:
     within = [
         _jaccard(s[i : i + NR_BLOCK], s[i + NR_BLOCK : i + 2 * NR_BLOCK])
         for s in sentences
-        for i in range(0, len(s) - NR_BLOCK, NR_BLOCK)
+        for i in range(0, len(s) - 2 * NR_BLOCK + 1, NR_BLOCK)
     ]
     parts = [sum(between) / len(between)]
     if within:
