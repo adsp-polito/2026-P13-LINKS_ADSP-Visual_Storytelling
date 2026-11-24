@@ -94,6 +94,11 @@ def test_names_not_in_the_text_change_nothing():
     assert mask_leaked_names("[male0] ran .", ["Tom", "Guy"], "Tom ran.") == "[male0] ran ."
 
 
+def test_name_that_is_only_dots_is_ignored():
+    # "." would otherwise match every word boundary and fill the text with placeholders.
+    assert story_text("tom ran .", [".", "Tom"], "Tom ran.") == "a person ran ."
+
+
 # ---------------------------------------------------------------- CSV
 
 _URL = "https://example.org/VST/alpha/tt0000001_0001{tail}/shot_{n:04d}_img_0.jpg"
@@ -177,6 +182,23 @@ def test_read_csv_treats_curly_braces_as_empty_link(tmp_path):
     assert len(story.urls) == 3 and story.n_texts == 4
 
 
+def test_read_csv_marks_a_gap_in_the_links_as_not_aligned(tmp_path):
+    # Same counts (3 links, 3 texts, 3 ids), but link2 is empty: shots would shift.
+    links = [_url(1), _url(2), "", _url(3)]
+    rows = [_row("1", "sc", [1, 2, 3], links=links, n_texts=3)]
+    (story,) = read_csv(_write_csv(tmp_path / "v.csv", rows))
+
+    assert (len(story.urls), story.n_listed, story.n_texts) == (3, 3, 3)
+    assert story.aligned is False
+
+
+def test_read_csv_rejects_duplicate_story_ids(tmp_path):
+    rows = [_row("5", "sc", [1, 2, 3]), _row("5", "sc", [4, 5, 6])]
+
+    with pytest.raises(ValueError, match="duplicate story_id"):
+        read_csv(_write_csv(tmp_path / "v.csv", rows))
+
+
 def test_image_urls_maps_each_shot_once(tmp_path):
     rows = [_row("1", "sc", [1, 2, 3]), _row("2", "sc", [2, 3, 4])]
     urls = image_urls(read_csv(_write_csv(tmp_path / "v.csv", rows)))
@@ -202,6 +224,7 @@ def _story(story_id: str, shots: list[int], text: str = "a man smiled .", **kw) 
         n_listed=kw.get("n_listed", len(sids)),
         n_texts=kw.get("n_texts", len(sids)),
         text=text,
+        aligned=kw.get("aligned", True),
     )
 
 
@@ -276,6 +299,16 @@ def test_build_records_counts_missing_before_broken(tmp_path):
     _, drops = _build([_story("s", [1, 2, 3])], raw, out)  # shot 3 is missing
 
     assert drops["missing_image"] == 1 and drops["broken_image"] == 0
+
+
+def test_build_records_drops_a_story_with_a_link_gap(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    for n in (1, 2, 3):
+        _make_image(raw, _sid(n))
+
+    records, drops = _build([_story("gap", [1, 2, 3], aligned=False)], raw, out)
+
+    assert records == [] and drops["link_count_mismatch"] == 1
 
 
 # ---------------------------------------------------------------- prepare

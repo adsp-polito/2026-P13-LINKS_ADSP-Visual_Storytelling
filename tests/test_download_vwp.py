@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "data" / "download_vwp.py"
 _spec = importlib.util.spec_from_file_location("download_vwp", _SCRIPT)
@@ -55,3 +56,30 @@ def test_fetch_removes_part_file_after_last_failure(tmp_path, monkeypatch):
 
     assert not dst.exists()
     assert not (tmp_path / "a.jpg.part").exists()
+
+
+def test_download_image_skips_a_valid_existing_file(tmp_path, monkeypatch):
+    dst = tmp_path / "a.jpg"
+    Image.new("RGB", (8, 8), "red").save(dst)
+    monkeypatch.setattr(download_vwp.urllib.request, "urlopen", _fake_urlopen([]))  # no call
+
+    assert download_vwp._download_image(("a", "https://example.org/a.jpg", dst)) == "here"
+
+
+def test_download_image_deletes_a_file_that_is_not_an_image(tmp_path, monkeypatch):
+    page = b"<html>error</html>"  # e.g. a server error page sent with HTTP 200
+    monkeypatch.setattr(download_vwp.urllib.request, "urlopen", _fake_urlopen([page]))
+    dst = tmp_path / "a.jpg"
+
+    assert download_vwp._download_image(("a", "https://example.org/a.jpg", dst)) == "failed"
+    assert not dst.exists()
+
+
+def test_download_image_reports_ok(tmp_path, monkeypatch):
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="JPEG")
+    monkeypatch.setattr(download_vwp.urllib.request, "urlopen", _fake_urlopen([buf.getvalue()]))
+    dst = tmp_path / "a.jpg"
+
+    assert download_vwp._download_image(("a", "https://example.org/a.jpg", dst)) == "ok"
+    assert dst.is_file()

@@ -13,7 +13,8 @@ Pipeline for :func:`prepare`:
 2. Story text = ``anonymised_story`` (lower-cased and tokenised, like VIST ``text``),
    with character names the anonymiser missed masked (:func:`mask_leaked_names`) and
    numbered placeholders rewritten (:func:`rewrite_placeholders`).
-3. Drop a whole story if its links do not match ``img_id_list`` and the text segments,
+3. Drop a whole story if its links do not match ``img_id_list`` and the text segments
+   (same count, no gaps),
    if it repeats an earlier story, if it has a bad number of images, no text, or any
    image that is missing or cannot be decoded (``drop_counts`` says why).
 4. Resize images to long side ≤ ``cfg.data.max_image_side`` into ``data/images/vwp/<split>/``.
@@ -153,6 +154,8 @@ def mask_leaked_names(anonymised: str, names: list[str], original: str) -> str:
     """
     leaked = []
     for name in names:
+        if not name.rstrip(".").strip():
+            continue  # a name like "." would match every word boundary
         pattern = _name_re(name)
         if not pattern.search(anonymised):
             continue
@@ -189,24 +192,37 @@ class RawStory:
     n_listed: int  # len(img_id_list)
     n_texts: int  # non-empty text0..9 segments (one per shot)
     text: str  # final story text (see story_text)
+    aligned: bool = True  # links and texts both fill slots 0..n-1 with no gap
 
 
 def read_csv(path: Path) -> list[RawStory]:
-    """Step 1–2: one :class:`RawStory` per CSV row, in file order."""
+    """Step 1–2: one :class:`RawStory` per CSV row, in file order.
+
+    Raises if two rows share a ``story_id``, because record ids must be unique per split.
+    """
     stories = []
+    seen_ids: set[str] = set()
     with path.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            urls = tuple(u for i in range(_N_LINKS) if (u := row[f"link{i}"].strip()) not in _EMPTY)
+            story_id = row["story_id"].strip()
+            if story_id in seen_ids:
+                raise ValueError(f"{path}: duplicate story_id {story_id!r}")
+            seen_ids.add(story_id)
+            link_slots = [i for i in range(_N_LINKS) if row[f"link{i}"].strip() not in _EMPTY]
+            text_slots = [i for i in range(_N_LINKS) if row[f"text{i}"].strip()]
+            urls = tuple(row[f"link{i}"].strip() for i in link_slots)
             names = [c for i in range(_N_CHARS) if (c := row[f"char{i}"].strip()) not in _EMPTY]
             stories.append(
                 RawStory(
-                    story_id=row["story_id"].strip(),
+                    story_id=story_id,
                     scene_id=row["scene_full_id"].strip(),
                     image_keys=tuple(image_key(u) for u in urls),
                     urls=urls,
                     n_listed=len(ast.literal_eval(row["img_id_list"])),
-                    n_texts=sum(1 for i in range(_N_LINKS) if row[f"text{i}"].strip()),
+                    n_texts=len(text_slots),
                     text=story_text(row["anonymised_story"], names, row["story"]),
+                    aligned=link_slots == list(range(len(link_slots)))
+                    and text_slots == list(range(len(text_slots))),
                 )
             )
     return stories
@@ -255,7 +271,7 @@ def build_records(
     records: list[StoryRecord] = []
     for story in stories:
         n = len(story.image_keys)
-        if n != story.n_listed or n != story.n_texts:
+        if not story.aligned or n != story.n_listed or n != story.n_texts:
             drops["link_count_mismatch"] += 1
             continue
         key = (story.image_keys, story.text)
