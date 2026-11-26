@@ -122,7 +122,7 @@ def test_build_records_resizes_and_rewrites(tmp_path):
     assert drops == _NO_DROPS
     (rec,) = records
     assert (rec.id, rec.dataset, rec.split) == ("s1", "vist", "val")
-    assert rec.story == "a man smiled . the man smiled . the man smiled ."
+    assert rec.story == "a man smiled. the man smiled. the man smiled."
     assert rec.dii == ["a woman holds a cup ."] * 3
     assert rec.dis == []
     assert [Path(p).name for p in rec.images] == ["p1.jpg", "p2.jpg", "p3.jpg"]
@@ -245,7 +245,7 @@ def test_prepare_writes_full_jsonl_and_dev_ids(tmp_path):
     assert out == tmp_path / "processed" / "vist_val.jsonl"
     records = read_jsonl(out, StoryRecord)
     assert [r.id for r in records] == ["s1", "s2", "s3"]  # the full split, not only dev ids
-    assert records[0].story == "a man smiled . the man smiled . the man smiled ."
+    assert records[0].story == "a man smiled. the man smiled. the man smiled."
     assert records[0].dii == ["a photo ."] * 3
 
     dev = tmp_path / "splits" / "vist_val_dev2.txt"

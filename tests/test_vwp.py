@@ -52,7 +52,7 @@ def test_organization_gets_an_and_case_is_ignored():
 
 def test_leaked_name_is_masked():
     assert story_text("carey waves at [male0] .", ["Carey"], "Carey waves at Tom.") == (
-        "a person waves at a man ."
+        "a person waves at a man."
     )
 
 
@@ -60,17 +60,17 @@ def test_two_leaked_names_and_longer_name_first():
     text = "al and alan talk . al leaves ."
     original = "Al and Alan talk. Al leaves."
     assert story_text(text, ["Al", "Alan"], original) == (
-        "a person and another person talk . the first person leaves ."
+        "a person and another person talk. the first person leaves."
     )
 
 
 def test_name_typed_in_lower_case_is_still_masked():
-    assert story_text("harrison waved .", ["Harrison"], "harrison waved.") == "a person waved ."
+    assert story_text("harrison waved .", ["Harrison"], "harrison waved.") == "a person waved."
 
 
 def test_name_with_dots_is_masked():
     assert story_text("t.j. 's dog ran . j.a judged .", ["T.J.", "J.A."], "x") == (
-        "a person 's dog ran . another person judged ."
+        "a person's dog ran. another person judged."
     )
 
 
@@ -87,7 +87,7 @@ def test_word_name_is_kept_when_story_uses_the_word():
 
 
 def test_word_name_is_masked_when_story_never_uses_the_word():
-    assert story_text("art is hacking .", ["Art"], "Art is hacking.") == "a person is hacking ."
+    assert story_text("art is hacking .", ["Art"], "Art is hacking.") == "a person is hacking."
 
 
 def test_names_not_in_the_text_change_nothing():
@@ -96,7 +96,59 @@ def test_names_not_in_the_text_change_nothing():
 
 def test_name_that_is_only_dots_is_ignored():
     # "." would otherwise match every word boundary and fill the text with placeholders.
-    assert story_text("tom ran .", [".", "Tom"], "Tom ran.") == "a person ran ."
+    assert story_text("tom ran .", [".", "Tom"], "Tom ran.") == "a person ran."
+
+
+def test_missed_name_reuses_the_anonymisers_placeholder():
+    # The anonymiser replaced the first two "John"s but missed the third one: keep one person.
+    original = "John met Ann. Later John's wife and John himself left."
+    anonymised = "[male0] met [female0] . later [male0] 's wife and john himself left ."
+    assert story_text(anonymised, ["John", "Ann"], original) == (
+        "a man met a woman. later the man's wife and the man himself left."
+    )
+
+
+def test_conflicting_placeholders_fall_back_to_a_person():
+    original = "John met Bob. John left. John slept."
+    anonymised = "[male0] met [male1] . [male1] left . john slept ."
+    assert story_text(anonymised, ["John"], original) == (
+        "a man met another man. the second man left. a person slept."
+    )
+
+
+def test_dotted_name_keeps_the_full_stop_at_a_shot_boundary():
+    # VWP joins the per-shot texts with two spaces; the first "T.J." also ends a sentence.
+    original = "Keith tried to grab T.J. T.J. was able to get loose."
+    anonymised = "[male0] tried to grab t.j.  t.j. was able to get loose ."
+    assert story_text(anonymised, ["T.J."], original) == (
+        "a man tried to grab a person.  the person was able to get loose."
+    )
+
+
+def test_dotted_name_mid_sentence_gets_no_full_stop():
+    assert story_text("t.j. and [male0] drive .", ["T.J."], "T.J. and Kevin drive.") == (
+        "a person and a man drive."
+    )
+
+
+def test_dotted_name_full_stop_found_in_the_original_story():
+    # Same shot, one space: the capital "It" in the original shows the sentence ended.
+    original = "Ann played with her brother W. It was fun. W. smiled."
+    anonymised = "[female0] played with her brother w. it was fun . w. smiled ."
+    assert story_text(anonymised, ["W."], original) == (
+        "a woman played with her brother a person. it was fun. the person smiled."
+    )
+
+
+def test_dotted_name_never_gets_a_second_full_stop():
+    assert story_text("she saw t.j. .", ["T.J."], "She saw T.J.") == "she saw a person."
+
+
+def test_up_to_ten_characters_of_a_kind_get_words():
+    text = " ".join(f"[male{i}]" for i in range(10)) + " . [male9] left ."
+    out = rewrite_placeholders(text)
+    assert "a ninth man" in out and "a tenth man" in out
+    assert out.endswith("the tenth man left .") and "no." not in out
 
 
 # ---------------------------------------------------------------- CSV
@@ -172,7 +224,7 @@ def test_read_csv_keeps_link_order_and_cleans_text(tmp_path):
     assert story.story_id == "7" and story.scene_id == "sc1"
     assert story.image_keys == (_sid(9), _sid(2), _sid(5))  # CSV order, not sorted
     assert (story.n_listed, story.n_texts) == (3, 3)
-    assert story.text == "a man ran . a person fell ."
+    assert story.text == "a man ran. a person fell."
 
 
 def test_read_csv_treats_curly_braces_as_empty_link(tmp_path):
@@ -356,7 +408,7 @@ def test_prepare_writes_jsonl_and_one_dev_id_per_scene(tmp_path):
     assert out == tmp_path / "processed" / "vwp_val.jsonl"
     records = read_jsonl(out, StoryRecord)
     assert [r.id for r in records] == ["0", "1", "2", "3"]  # the full split, not only dev ids
-    assert records[0].story == "a man smiled ."
+    assert records[0].story == "a man smiled."
 
     dev = read_ids(tmp_path / "splits" / "vwp_val_dev2.txt")
     scenes = {_STORIES[i][0] for i in dev}

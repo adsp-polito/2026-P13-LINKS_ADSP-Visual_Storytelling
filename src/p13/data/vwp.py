@@ -11,8 +11,10 @@ Pipeline for :func:`prepare`:
 1. Read the CSV (:func:`read_csv`): one story per row. Its images are the row's own
    ``link0..k`` in that order (writers picked different shots of the same scene).
 2. Story text = ``anonymised_story`` (lower-cased and tokenised, like VIST ``text``),
-   with character names the anonymiser missed masked (:func:`mask_leaked_names`) and
-   numbered placeholders rewritten (:func:`rewrite_placeholders`).
+   with character names the anonymiser missed masked (:func:`mask_leaked_names`: its own
+   placeholder for that name if the same story shows it, else "a person") and numbered
+   placeholders rewritten (:func:`rewrite_placeholders`), then PTB tokenisation undone
+   (``text.detokenize``: "does n't" -> "doesn't", "home ." -> "home.").
 3. Drop a whole story if its links do not match ``img_id_list`` and the text segments
    (same count, no gaps),
    if it repeats an earlier story, if it has a bad number of images, no text, or any
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import difflib
 import logging
 import random
 import re
@@ -40,6 +43,7 @@ from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
 from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
 from p13.data.images import find_image, is_valid_image, resize_long_side
+from p13.data.text import detokenize
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +55,18 @@ NOUNS: dict[str, str] = {
     "organization": "organization",
     "person": "person",  # character names the VWP anonymiser missed
 }
-_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
+_ORDINALS = (
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+)
 _PLACEHOLDER_RE = re.compile(r"\[(male|female|location|organization|person)(\d*)\]", re.IGNORECASE)
 
 # Character names that are also English words in VWP stories (checked on train + val
@@ -145,12 +160,70 @@ def _name_re(name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){core}\.?(?!\w)", re.IGNORECASE)
 
 
-def mask_leaked_names(anonymised: str, names: list[str], original: str) -> str:
-    """Turn character names the VWP anonymiser missed into ``[personN]`` placeholders.
+# Tokens of a lower-cased story: placeholders, words (dotted names like "t.j." stay one
+# token), clitics ("'s") and punctuation. Only used to line up two versions of a story.
+_TOKEN_RE = re.compile(r"\[[a-z]+\d*\]|[a-z0-9]+(?:\.[a-z0-9]+)*\.?|'[a-z]+|[^\w\s]")
+_PERSON_PLACEHOLDER_RE = re.compile(r"\[(?:male|female)\d+\]")
 
-    A name that is also an English word (``WORD_NAMES``) is masked only if the original
+
+def anonymiser_placeholder(name: str, original: str, anonymised: str) -> str | None:
+    """The placeholder the VWP anonymiser used for ``name`` elsewhere in the same story.
+
+    The anonymiser sometimes replaces a name in one sentence and misses it in another.
+    Lining up the original and the anonymised story word by word (``difflib``) shows which
+    ``[maleN]`` / ``[femaleN]`` stands where the original has the name. Returns it only if
+    every such spot agrees on one placeholder, else ``None``.
+    """
+    orig = _TOKEN_RE.findall(original.lower())
+    anon = _TOKEN_RE.findall(anonymised.lower())
+    forms = {name.lower(), name.lower().rstrip(".")}
+    votes: set[str] = set()
+    matcher = difflib.SequenceMatcher(None, orig, anon, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "replace" and i2 - i1 == j2 - j1:
+            for o, a in zip(orig[i1:i2], anon[j1:j2], strict=True):
+                if o in forms and _PERSON_PLACEHOLDER_RE.fullmatch(a):
+                    votes.add(a)
+    return votes.pop() if len(votes) == 1 else None
+
+
+def _sentence_ends(name: str, anonymised: str, original: str) -> list[bool]:
+    """For each match of ``name`` in ``anonymised``: does its final dot also end a sentence?
+
+    In "grab T.J. T.J. was", the dot after the first "T.J." ends the sentence too, and the
+    name pattern would swallow it. True if the match ends with "." and is followed by two
+    spaces (VWP joins the per-shot texts with two spaces) or by the end of the text; or, when
+    the name occurs as often in ``original`` as in ``anonymised``, if the same occurrence in
+    ``original`` is followed by a capital letter or the end of the text.
+    """
+    pattern = _name_re(name)
+    matches = list(pattern.finditer(anonymised))
+    in_original = [
+        bool(re.match(r"\s+[A-Z\"']|\s*$", original[m.end() :])) for m in pattern.finditer(original)
+    ]
+    same_count = len(in_original) == len(matches)
+    ends = []
+    for k, m in enumerate(matches):
+        after = anonymised[m.end() :]
+        if not m.group(0).endswith(".") or after.lstrip().startswith("."):
+            ends.append(False)  # no dot swallowed, or a full stop is already there
+            continue
+        ends.append(after.startswith("  ") or not after.strip() or (same_count and in_original[k]))
+    return ends
+
+
+def mask_leaked_names(anonymised: str, names: list[str], original: str) -> str:
+    """Replace character names the VWP anonymiser missed.
+
+    * If the same story shows which placeholder the anonymiser used for the name
+      (:func:`anonymiser_placeholder`), that placeholder is reused, so the character stays
+      one person with the right gender.
+    * Otherwise the name becomes ``[personN]`` ("a person").
+    * A dot swallowed with a dotted name ("T.J.") is put back when it also ended a sentence.
+
+    A name that is also an English word (``WORD_NAMES``) is replaced only if the original
     story never uses it in lower case; otherwise masking could break a normal word
-    ("a guy"), so the name is kept. All other names are always masked.
+    ("a guy"), so the name is kept.
     """
     leaked = []
     for name in names:
@@ -165,14 +238,22 @@ def mask_leaked_names(anonymised: str, names: list[str], original: str) -> str:
         leaked.append((name, pattern))
     # Longer names first, so "Alan" is not half-replaced by the pattern for "Al".
     leaked.sort(key=lambda x: len(x[0]), reverse=True)
-    for i, (_, pattern) in enumerate(leaked):
-        anonymised = pattern.sub(f"[person{i}]", anonymised)
+    n_person = 0
+    for name, pattern in leaked:
+        placeholder = anonymiser_placeholder(name, original, anonymised)
+        if placeholder is None:
+            placeholder = f"[person{n_person}]"
+            n_person += 1
+        ends = iter(_sentence_ends(name, anonymised, original))
+        anonymised = pattern.sub(
+            lambda m, p=placeholder, e=ends: p + (" ." if next(e) else ""), anonymised
+        )
     return anonymised
 
 
 def story_text(anonymised: str, names: list[str], original: str) -> str:
-    """Final story text: leaked names masked, then placeholders rewritten."""
-    return rewrite_placeholders(mask_leaked_names(anonymised, names, original)).strip()
+    """Final story text: leaked names masked, placeholders rewritten, then detokenised."""
+    return detokenize(rewrite_placeholders(mask_leaked_names(anonymised, names, original))).strip()
 
 
 def image_key(url: str) -> str:

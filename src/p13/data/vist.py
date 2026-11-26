@@ -14,7 +14,8 @@ Pipeline for :func:`prepare`:
 3. Resize images to long side ≤ ``cfg.data.max_image_side`` (``images.resize_long_side``)
    into ``data/images/vist/<split>/``.
 4. Rewrite placeholders ``[male]`` / ``[female]`` / ``[location]`` / ``[organization]``
-   (:func:`rewrite_placeholders`).
+   (:func:`rewrite_placeholders`), then undo PTB tokenisation (``text.detokenize``:
+   "does n't" -> "doesn't", "home ." -> "home.").
 5. Attach per-photo DII / DIS text if those files exist.
 6. Write ``data/processed/vist_<split>.jsonl`` (``write_jsonl``) and, for val/test, the
    dev-200 id list (``p13.common.subset``).
@@ -35,6 +36,7 @@ from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
 from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
 from p13.data.images import find_image, is_valid_image, resize_long_side
+from p13.data.text import detokenize
 
 log = logging.getLogger(__name__)
 
@@ -181,7 +183,7 @@ def build_records(
         if not all(story.sentences):
             drops["empty_sentence"] += 1
             continue
-        text = rewrite_placeholders(" ".join(story.sentences))
+        text = detokenize(rewrite_placeholders(" ".join(story.sentences)))
         checks = [check(pid) for pid in story.photo_ids]
         failed = {c for c in checks if isinstance(c, str)}
         if failed:
