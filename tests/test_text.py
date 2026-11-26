@@ -15,6 +15,12 @@ from p13.data.text import detokenize
         ("she has n't left .", "she hasn't left."),
         ("i ca n't and i wo n't .", "i can't and i won't."),
         ("the man 's wife .", "the man's wife."),
+        # Rule 1 with curly apostrophes (VWP val/595: "the man \u2019s").
+        ("the man \u2019s safe .", "the man\u2019s safe."),
+        (
+            "he did n\u2019t stop , they \u2019re here , i \u2019m sure .",
+            "he didn\u2019t stop, they\u2019re here, i\u2019m sure.",
+        ),
         (
             "they 're here , we 'll go , i 've seen , i 'm sure , he 'd stay .",
             "they're here, we'll go, i've seen, i'm sure, he'd stay.",
@@ -43,6 +49,7 @@ def test_quotes_are_left_alone():
     # Opening and closing quotes cannot be told apart; a lone ' may end a plural possessive.
     assert detokenize("he sang ' happy birthday ' .") == "he sang ' happy birthday '."
     assert detokenize("their horses ' hooves .") == "their horses ' hooves."
+    assert detokenize("the knights \u2019 colleagues .") == "the knights \u2019 colleagues."
     assert detokenize('she said " no " .') == 'she said " no ".'
 
 

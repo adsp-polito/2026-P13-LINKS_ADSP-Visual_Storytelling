@@ -14,7 +14,11 @@ import re
 # output can be matched by another rule.
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # 1. Contractions and possessives: "does n't" -> "doesn't", "man 's" -> "man's".
-    (re.compile(r"(?<=\w) (n't|'s|'re|'ll|'ve|'m|'d)(?!\w)", re.IGNORECASE), r"\1"),
+    #    Straight (') and curly (\u2019) apostrophes: "man \u2019s" -> "man\u2019s".
+    (
+        re.compile(r"(?<=\w) (n['\u2019]t|['\u2019](?:s|re|ll|ve|m|d))(?!\w)", re.IGNORECASE),
+        r"\1",
+    ),
     # 2. No space before punctuation, and none inside brackets.
     (re.compile(r"(?<=\S) (?=[.,!?;:)])"), ""),
     (re.compile(r"\( (?=\S)"), "("),
@@ -28,8 +32,9 @@ _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 def detokenize(text: str) -> str:
     """Undo PTB tokenisation in ``text``.
 
-    * Rejoins contractions and ``'s``, removes the space before ``. , ! ? ; :`` and
-      inside ``( )``, and rejoins ``gon na`` / ``wan na`` / ``got ta`` / ``can not``.
+    * Rejoins contractions and ``'s`` (straight or curly apostrophe), removes the space
+      before ``. , ! ? ; :`` and inside ``( )``, and rejoins ``gon na`` / ``wan na`` /
+      ``got ta`` / ``can not``.
     * Only single spaces next to these pieces are removed; other spacing (such as the
       two spaces VWP puts between shots) is kept.
     * Quote marks (``'`` or ``"`` on their own) are left alone: an opening and a closing
