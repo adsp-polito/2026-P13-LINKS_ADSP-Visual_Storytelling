@@ -160,9 +160,22 @@ def _name_re(name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){core}\.?(?!\w)", re.IGNORECASE)
 
 
-# Tokens of a lower-cased story: placeholders, words (dotted names like "t.j." stay one
-# token), clitics ("'s") and punctuation. Only used to line up two versions of a story.
-_TOKEN_RE = re.compile(r"\[[a-z]+\d*\]|[a-z0-9]+(?:\.[a-z0-9]+)*\.?|'[a-z]+|[^\w\s]")
+# Tokens of a lower-cased story, split the same way the VWP anonymiser splits its text, so
+# that both versions of a story line up token by token: placeholders, titles ("dr.") and
+# initials ("t.j", "t.j.", "w.") keep their dot; any other word does not ("around." ->
+# "around" "."); "hasn't" -> "has" "n't"; clitics ("'s") and punctuation. Straight and
+# curly apostrophes are both handled. Only used to line up two versions of a story.
+_TOKEN_RE = re.compile(
+    r"\[[a-z]+\d*\]"
+    r"|(?:dr|mr|mrs|ms)\."
+    r"|[a-z](?:\.[a-z])+\.?"
+    r"|[a-z]\.(?!\w)"
+    r"|[a-z0-9]+(?=n['\u2019]t)"
+    r"|n['\u2019]t"
+    r"|[a-z0-9]+"
+    r"|['\u2019][a-z]+"
+    r"|[^\w\s]"
+)
 _PERSON_PLACEHOLDER_RE = re.compile(r"\[(?:male|female)\d+\]")
 
 

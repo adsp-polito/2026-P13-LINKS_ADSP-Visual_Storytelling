@@ -13,6 +13,7 @@ from p13.common.subset import read_ids
 from p13.data.vwp import (
     DROP_REASONS,
     RawStory,
+    anonymiser_placeholder,
     build_records,
     image_key,
     image_urls,
@@ -114,6 +115,34 @@ def test_conflicting_placeholders_fall_back_to_a_person():
     assert story_text(anonymised, ["John"], original) == (
         "a man met another man. the second man left. a person slept."
     )
+
+
+def test_placeholder_is_found_right_after_a_full_stop():
+    # "around." is one word in the original but "around" "." in the anonymised text.
+    original = "They looked around. John ran. Later John slept."
+    anonymised = "they looked around . [male0] ran . later john slept ."
+    assert anonymiser_placeholder("John", original, anonymised) == "[male0]"
+
+
+@pytest.mark.parametrize(
+    ("original", "anonymised"),
+    [
+        ("John hasn't left. Later John slept.", "[male0] has n't left . later john slept ."),
+        (
+            "John didn\u2019t stop. Later John slept.",
+            "[male0] did n\u2019t stop . later john slept .",
+        ),
+    ],
+)
+def test_placeholder_is_found_next_to_nt(original, anonymised):
+    # "hasn't" must split like the anonymiser's "has n't" (straight or curly apostrophe).
+    assert anonymiser_placeholder("John", original, anonymised) == "[male0]"
+
+
+def test_titles_and_initials_keep_their_dot_when_lining_up():
+    original = "Dr. Lee met T.J. at home. Later T.J. slept."
+    anonymised = "dr. [male0] met [male1] at home . later t.j. slept ."
+    assert anonymiser_placeholder("T.J.", original, anonymised) == "[male1]"
 
 
 def test_dotted_name_keeps_the_full_stop_at_a_shot_boundary():
