@@ -15,8 +15,10 @@ Pipeline for :func:`prepare`:
    placeholder for that name if the same story shows it, else "a person") and numbered
    placeholders rewritten (:func:`rewrite_placeholders`), then PTB tokenisation undone
    (``text.detokenize``: "does n't" -> "doesn't", "home ." -> "home.").
-3. Drop a whole story if its links do not match ``img_id_list`` and the text segments
-   (same count, no gaps),
+3. Drop a whole story if (train only) it uses a shot that is also in val: same movie and
+   shot number, read from the val CSV (:func:`shots_of`), so training never sees a frame
+   of the val/test stories; if its links do not match ``img_id_list`` and the text
+   segments (same count, no gaps),
    if it repeats an earlier story, if it has a bad number of images, no text, or any
    image that is missing or cannot be decoded (``drop_counts`` says why).
 4. Resize images to long side ≤ ``cfg.data.max_image_side`` into ``data/images/vwp/<split>/``.
@@ -108,6 +110,7 @@ _N_LINKS, _N_CHARS = 10, 5
 
 # Why a whole story can be dropped (keys of the ``drop_counts`` dict).
 DROP_REASONS = (
+    "val_overlap",  # first, so every train story that shares a shot with val is counted here
     "link_count_mismatch",
     "duplicate",
     "bad_length",
@@ -277,6 +280,13 @@ def image_key(url: str) -> str:
     return "_".join(m.groups())
 
 
+# (movie id, shot number), e.g. ("tt0047396", "0667"). VWP cuts a movie into scenes in more
+# than one way, so one shot can sit in a train scene and a val scene under two folder names.
+Shot = tuple[str, str]
+_KEY_SHOT_RE = re.compile(r"^(tt\d+)_.*_shot_(\d+)_img_\d+$")  # from image_key
+_LISTED_SHOT_RE = re.compile(r"^(tt\d+)_(\d+)_\d+$")  # img_id_list entry "tt0047396_0667_0"
+
+
 @dataclass(frozen=True)
 class RawStory:
     story_id: str
@@ -287,6 +297,7 @@ class RawStory:
     n_texts: int  # non-empty text0..9 segments (one per shot)
     text: str  # final story text (see story_text)
     aligned: bool = True  # links and texts both fill slots 0..n-1 with no gap
+    listed_shots: frozenset[Shot] = frozenset()  # (movie, shot) of each img_id_list entry
 
 
 def read_csv(path: Path) -> list[RawStory]:
@@ -306,20 +317,36 @@ def read_csv(path: Path) -> list[RawStory]:
             text_slots = [i for i in range(_N_LINKS) if row[f"text{i}"].strip()]
             urls = tuple(row[f"link{i}"].strip() for i in link_slots)
             names = [c for i in range(_N_CHARS) if (c := row[f"char{i}"].strip()) not in _EMPTY]
+            listed = [str(x) for x in ast.literal_eval(row["img_id_list"])]
             stories.append(
                 RawStory(
                     story_id=story_id,
                     scene_id=row["scene_full_id"].strip(),
                     image_keys=tuple(image_key(u) for u in urls),
                     urls=urls,
-                    n_listed=len(ast.literal_eval(row["img_id_list"])),
+                    n_listed=len(listed),
                     n_texts=len(text_slots),
                     text=story_text(row["anonymised_story"], names, row["story"]),
                     aligned=link_slots == list(range(len(link_slots)))
                     and text_slots == list(range(len(text_slots))),
+                    listed_shots=frozenset(
+                        m.groups() for x in listed if (m := _LISTED_SHOT_RE.match(x))
+                    ),
                 )
             )
     return stories
+
+
+def shots_of(story: RawStory) -> set[Shot]:
+    """Every (movie, shot) of ``story``, from its image keys and from ``img_id_list``.
+
+    The image number is ignored on purpose: two frames of one shot look almost the same.
+    """
+    shots = set(story.listed_shots)
+    for key in story.image_keys:
+        if m := _KEY_SHOT_RE.match(key):
+            shots.add((m.group(1), m.group(2)))
+    return shots
 
 
 def image_urls(stories: list[RawStory]) -> dict[str, str]:
@@ -339,11 +366,13 @@ def build_records(
     raw_image_dir: Path,
     out_image_dir: Path,
     max_image_side: int,
+    exclude_shots: set[Shot] | frozenset[Shot] = frozenset(),
 ) -> tuple[list[StoryRecord], dict[str, int]]:
     """Steps 3–4: return ``(records, drop_counts)``; log how many stories were dropped and why.
 
     Checks run in ``DROP_REASONS`` order, so a story is counted under its first problem.
-    For duplicates (same images and same text), the first story in the file is kept.
+    A story that uses any shot in ``exclude_shots`` (the val shots, for train) is dropped as
+    ``val_overlap``. For duplicates (same images and same text), the first story is kept.
     If a story has both missing and broken images, it counts as ``missing_image``.
     Images are only resized for stories that are kept.
     """
@@ -364,6 +393,9 @@ def build_records(
 
     records: list[StoryRecord] = []
     for story in stories:
+        if exclude_shots and not exclude_shots.isdisjoint(shots_of(story)):
+            drops["val_overlap"] += 1
+            continue
         n = len(story.image_keys)
         if not story.aligned or n != story.n_listed or n != story.n_texts:
             drops["link_count_mismatch"] += 1
@@ -472,6 +504,15 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
         raise FileNotFoundError(
             f"{raw_image_dir} not found; run: python data/download_vwp.py --split {split}"
         )
+    exclude_shots: set[Shot] = set()
+    if split == "train":
+        val_csv = raw_dir / csv_name("val")
+        if not val_csv.is_file():
+            raise FileNotFoundError(
+                f"{val_csv} not found: train drops every story that shares a shot with val; "
+                "run: python data/download_vwp.py --split train"
+            )
+        exclude_shots = set().union(*(shots_of(s) for s in read_csv(val_csv)))
     stories = read_csv(csv_path)
     records, drops = build_records(
         stories,
@@ -479,6 +520,7 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
         raw_image_dir=raw_image_dir,
         out_image_dir=Path(cfg.data.image_dir) / "vwp" / split,
         max_image_side=cfg.data.max_image_side,
+        exclude_shots=exclude_shots,
     )
     out_path = Path(cfg.data.jsonl_dir) / f"vwp_{split}.jsonl"
     if not records:

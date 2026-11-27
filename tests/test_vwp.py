@@ -1,6 +1,7 @@
 """Tests for the VWP loader. Tiny fake CSVs and images only (CI has no datasets)."""
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from p13.data.vwp import (
     prepare,
     read_csv,
     rewrite_placeholders,
+    shots_of,
     story_text,
 )
 
@@ -280,6 +282,22 @@ def test_read_csv_rejects_duplicate_story_ids(tmp_path):
         read_csv(_write_csv(tmp_path / "v.csv", rows))
 
 
+def test_read_csv_reads_shots_from_img_id_list(tmp_path):
+    row = _row("1", "sc", [1, 2, 3])
+    row["img_id_list"] = str(["tt0047396_0667_0", "tt0047396_0668_1", "not_a_shot"])
+    (story,) = read_csv(_write_csv(tmp_path / "v.csv", [row]))
+    assert story.listed_shots == {("tt0047396", "0667"), ("tt0047396", "0668")}
+    assert story.n_listed == 3
+
+
+def test_shots_of_ignores_the_scene_folder_and_adds_listed_shots():
+    a = _story("a", [1, 2])
+    # The same shot 2 in another scene folder ("_5"), plus one shot only in img_id_list.
+    b = replace(a, image_keys=(_sid(2, "_5"),), listed_shots=frozenset({("tt9", "0007")}))
+    assert shots_of(a) == {("tt0000001", "0001"), ("tt0000001", "0002")}
+    assert shots_of(b) == {("tt0000001", "0002"), ("tt9", "0007")}
+
+
 def test_image_urls_maps_each_shot_once(tmp_path):
     rows = [_row("1", "sc", [1, 2, 3]), _row("2", "sc", [2, 3, 4])]
     urls = image_urls(read_csv(_write_csv(tmp_path / "v.csv", rows)))
@@ -352,6 +370,7 @@ def test_build_records_drop_reasons(tmp_path):
 
     assert [r.id for r in records] == ["ok"]
     assert drops == {
+        "val_overlap": 0,
         "link_count_mismatch": 2,
         "duplicate": 1,
         "bad_length": 1,
@@ -392,6 +411,29 @@ def test_build_records_drops_a_story_with_a_link_gap(tmp_path):
     assert records == [] and drops["link_count_mismatch"] == 1
 
 
+def test_build_records_drops_val_overlap_first(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    for n in range(1, 7):
+        _make_image(raw, _sid(n))
+    stories = [
+        _story("keep", [1, 2, 3]),
+        _story("shares_shot_4", [4, 5, 6]),
+        _story("gap_and_shares_shot_4", [4, 5, 6], "a woman sat .", aligned=False),
+    ]
+
+    records, drops = build_records(
+        stories,
+        split="train",
+        raw_image_dir=raw,
+        out_image_dir=out,
+        max_image_side=448,
+        exclude_shots={("tt0000001", "0004")},
+    )
+
+    assert [r.id for r in records] == ["keep"]
+    assert drops == _NO_DROPS | {"val_overlap": 2}  # counted before the link gap
+
+
 # ---------------------------------------------------------------- prepare
 
 # story id -> (scene, shots); scenes A and B have two stories each.
@@ -411,6 +453,11 @@ def _write_split(root: Path, split: str) -> None:
         for n in shots:
             _make_image(vwp / "images" / split, _sid(n))
     _write_csv(vwp / f"vwp_v2.1_{split}.csv", rows)
+
+
+def _write_val_csv(root: Path, shots: list[int]) -> None:
+    """Only the val CSV (no images): what prepare("train") reads to find the val shots."""
+    _write_csv(root / "raw" / "vwp" / "vwp_v2.1_val.csv", [_row("v1", "V", shots)])
 
 
 def _cfg(root: Path):
@@ -450,10 +497,26 @@ def test_prepare_writes_jsonl_and_one_dev_id_per_scene(tmp_path):
 
 def test_prepare_train_writes_no_dev_ids(tmp_path):
     _write_split(tmp_path, "train")
+    _write_val_csv(tmp_path, [50, 51, 52])
 
     prepare(_cfg(tmp_path), "train")
 
     assert not (tmp_path / "splits").exists()
+
+
+def test_prepare_train_drops_stories_that_share_a_shot_with_val(tmp_path):
+    _write_split(tmp_path, "train")
+    _write_val_csv(tmp_path, [3, 50, 51])  # shot 3 is only in train story "0"
+
+    out = prepare(_cfg(tmp_path), "train")
+
+    assert [r.id for r in read_jsonl(out, StoryRecord)] == ["1", "2", "3"]
+
+
+def test_prepare_train_fails_without_val_csv(tmp_path):
+    _write_split(tmp_path, "train")
+    with pytest.raises(FileNotFoundError, match=r"vwp_v2\.1_val\.csv"):
+        prepare(_cfg(tmp_path), "train")
 
 
 def test_prepare_skips_dev_ids_when_images_are_missing(tmp_path):
