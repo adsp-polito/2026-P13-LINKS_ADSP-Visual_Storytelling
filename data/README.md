@@ -49,10 +49,11 @@ the E0 configs). `p13-prepare` writes each list once (seed 42) and never overwri
 
 | Dataset | Dev (prompt tuning) | Final test |
 |---|---|---|
+| VIST | `vist_val_dev200` (one story per album) | `vist_test_1010` (one story per album) |
 | VWP | `vwp_train_dev200` | `vwp_val_791` |
 
 `p13-prepare` also writes `data/processed/<dataset>_<split>_groups.tsv` (`id`, `group`; the
-VWP scene) for the cluster bootstrap in eval. It is gitignored and shared with the JSONL.
+VWP scene or the VIST album) for the cluster bootstrap in eval. It is gitignored and shared with the JSONL.
 
 ## Licensing / GDPR
 
