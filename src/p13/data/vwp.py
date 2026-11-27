@@ -36,7 +36,6 @@ import ast
 import csv
 import difflib
 import logging
-import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -47,13 +46,12 @@ from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
 from p13.common.subset import (
     groups_path,
-    read_ids,
     sample_ids,
     subset_file,
     subset_path,
     write_groups,
-    write_ids,
 )
+from p13.data.id_lists import ensure_id_list, one_per_group
 from p13.data.images import find_image, is_valid_image, resize_long_side
 from p13.data.text import detokenize
 
@@ -443,44 +441,6 @@ def build_records(
     return records, drops
 
 
-def _one_per_group(ids: set[str], group_of: dict[str, str], seed: int) -> list[str]:
-    """One random kept story per group (groups and ids sorted first, so it is deterministic)."""
-    by_group: dict[str, list[str]] = defaultdict(list)
-    for i in sorted(ids):
-        by_group[group_of[i]].append(i)
-    rng = random.Random(seed)
-    return [rng.choice(by_group[g]) for g in sorted(by_group)]
-
-
-def _ensure_id_list(path: Path, ids: list[str], built: set[str], drops: dict[str, int]) -> None:
-    """Write the committed id list ``path`` once; never overwrite an existing one.
-
-    Raises if an existing list names stories that were not built here, because eval would
-    then silently run on fewer stories than the committed list. Writes nothing if no story
-    was built or if images are missing (the download is incomplete).
-    """
-    if path.exists():
-        absent = [i for i in read_ids(path) if i not in built]
-        if absent:
-            raise RuntimeError(
-                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
-                f"check the images (drop counts: {drops})"
-            )
-        return
-    if not built:
-        log.warning("not writing %s: no stories were built", path)
-        return
-    if drops["missing_image"]:
-        log.warning(
-            "not writing %s: %d stories lack images. Download all images first.",
-            path,
-            drops["missing_image"],
-        )
-        return
-    write_ids(path, ids)
-    log.info("wrote %s (%d ids)", path, len(ids))
-
-
 def _write_id_lists(
     cfg: ExperimentConfig,
     split: str,
@@ -499,16 +459,16 @@ def _write_id_lists(
     built = {r.id for r in records}
     if split == "train":
         size = cfg.data.dev_subset_size
-        per_scene = _one_per_group(built, scene_of, seed)
+        per_scene = one_per_group(built, scene_of, seed)
         if len(per_scene) < size:
             log.warning("VWP train: only %d scenes, so the dev list is smaller", len(per_scene))
         path = subset_path(cfg.data.splits_dir, "vwp", "train", size)
-        _ensure_id_list(path, sample_ids(per_scene, size, seed), built, drops)
+        ensure_id_list(path, sample_ids(per_scene, size, seed), built, drops)
     else:
         sequence_of = {r.id: "\n".join(r.images) for r in records}
-        ids = sorted(_one_per_group(built, sequence_of, seed), key=lambda i: (len(i), i))
+        ids = sorted(one_per_group(built, sequence_of, seed), key=lambda i: (len(i), i))
         path = subset_file(cfg.data.splits_dir, "vwp", "val", str(len(ids)))
-        _ensure_id_list(path, ids, built, drops)
+        ensure_id_list(path, ids, built, drops)
 
 
 def prepare(cfg: ExperimentConfig, split: str) -> Path:
