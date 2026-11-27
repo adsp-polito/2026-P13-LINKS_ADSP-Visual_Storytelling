@@ -10,8 +10,9 @@ Clean reimplementation of https://github.com/akskuchi/groovist with our own regi
    any image of the sequence (order-independent).
 4. Penalty: alignment ``a`` stays ``a`` if ``a >= θ`` and becomes ``a − θ`` otherwise, with
    θ fixed per dataset (``eval.groovist_threshold``).
-5. Concreteness: each phrase is weighted by the mean Brysbaert concreteness of its words
-   (the word, else its lemma; words not in the list are skipped; 1.0 if none is found).
+5. Concreteness: each phrase is weighted by the Brysbaert concreteness of its head noun
+   (spaCy ``chunk.root``: the word, else its lemma, else 1.0). The authors average every word,
+   so "the dog" weighed less than "dogs"; the head alone removes that style effect.
 6. Story score = tanh(mean over phrases of weight · penalised alignment), in (−1, 1).
    A story without noun phrases gets no score.
 
@@ -50,7 +51,7 @@ PLACEHOLDERS = {
     "[organization]": "organization",
 }
 
-Token = tuple[str, str, str]
+Token = tuple[str, str, str, bool]
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ def select_phrases(chunks: list[list[Token]]) -> list[list[Token]]:
     for chunk in chunks:
         if not chunk or (len(chunk) == 1 and chunk[0][2] == "PRON"):
             continue
-        text = " ".join(word for word, _, _ in chunk)
+        text = _phrase_text(chunk)
         if text in seen:
             continue
         seen.add(text)
@@ -90,13 +91,17 @@ def select_phrases(chunks: list[list[Token]]) -> list[list[Token]]:
 
 
 def concreteness(chunk: list[Token], lexicon: dict[str, float]) -> float:
-    """Mean rating of the words found in the lexicon (word first, then lemma)."""
-    found = []
-    for word, lemma, _ in chunk:
-        rating = lexicon.get(word, lexicon.get(lemma))
-        if rating is not None:
-            found.append(rating)
-    return sum(found) / len(found) if found else DEFAULT_WEIGHT
+    """Rating of the chunk's head noun: the word, else its lemma, else ``DEFAULT_WEIGHT``.
+
+    Only the head counts, so articles and possessives ("the", "his") don't change the weight.
+    """
+    heads = [t for t in chunk if t[3]] or chunk[-1:]
+    word, lemma, _, _ = heads[0]
+    return lexicon.get(word, lexicon.get(lemma, DEFAULT_WEIGHT))
+
+
+def _phrase_text(chunk: list[Token]) -> str:
+    return " ".join(t[0] for t in chunk)
 
 
 def max_alignments(phrase_embs: np.ndarray, region_embs: list[np.ndarray]) -> np.ndarray:
@@ -129,7 +134,7 @@ def story_phrases_on(
     chunks = select_phrases(backend.noun_chunks(clean_text(story)))
     if not chunks:
         return [[] for _ in image_sets]
-    texts = [" ".join(word for word, _, _ in chunk) for chunk in chunks]
+    texts = [_phrase_text(chunk) for chunk in chunks]
     weights = [concreteness(chunk, lexicon) for chunk in chunks]
     embs = backend.embed_texts(texts)
     out = []
@@ -409,7 +414,10 @@ class _ModelBackend:
 
     def noun_chunks(self, text: str) -> list[list[Token]]:
         doc = self._nlp(text)
-        return [[(t.lower_, t.lemma_.lower(), t.pos_) for t in chunk] for chunk in doc.noun_chunks]
+        return [
+            [(t.lower_, t.lemma_.lower(), t.pos_, t.i == chunk.root.i) for t in chunk]
+            for chunk in doc.noun_chunks
+        ]
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         inputs = self._clip_proc(text=texts, padding=True, truncation=True, return_tensors="pt")

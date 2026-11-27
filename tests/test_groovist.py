@@ -19,7 +19,8 @@ THETA = 0.6
 
 
 def _tok(text, pos="NOUN"):
-    return [(w, w.rstrip("s"), pos) for w in text.split()]
+    words = text.split()
+    return [(w, w.rstrip("s"), pos, i == len(words) - 1) for i, w in enumerate(words)]
 
 
 class FakeBackend:
@@ -49,20 +50,31 @@ def test_clean_text_replaces_vist_placeholders():
 def test_select_phrases_drops_single_pronouns_and_repeats():
     chunks = [
         _tok("the dog"),
-        [("they", "they", "PRON")],
-        _tok("his", "PRON") + _tok("ball"),
+        [("they", "they", "PRON", True)],
+        [("his", "his", "PRON", False), ("ball", "ball", "NOUN", True)],
         _tok("the dog"),
         [],
     ]
-    kept = [" ".join(w for w, _, _ in c) for c in gv.select_phrases(chunks)]
+    kept = [" ".join(t[0] for t in c) for c in gv.select_phrases(chunks)]
     assert kept == ["the dog", "his ball"]
 
 
-def test_concreteness_is_mean_of_known_words_with_lemma_fallback():
-    lexicon = {"the": 1.5, "dog": 4.5}
-    assert gv.concreteness([("the", "the", "DET"), ("dogs", "dog", "NOUN")], lexicon) == 3.0
-    assert gv.concreteness([("the", "the", "DET"), ("zzz", "zzz", "X")], lexicon) == 1.5
-    assert gv.concreteness([("zzz", "zzz", "X")], lexicon) == gv.DEFAULT_WEIGHT
+def test_concreteness_is_the_head_noun_with_lemma_then_default_fallback():
+    lexicon = {"the": 1.5, "his": 3.1, "big": 3.7, "dog": 4.5}
+    the_big_dogs = [
+        ("the", "the", "DET", False),
+        ("big", "big", "ADJ", False),
+        ("dogs", "dog", "NOUN", True),
+    ]
+    assert gv.concreteness(the_big_dogs, lexicon) == 4.5
+    assert gv.concreteness([("dog", "dog", "NOUN", True)], lexicon) == 4.5
+    assert gv.concreteness(
+        [("his", "his", "PRON", False), ("zzz", "zzz", "NOUN", True)], lexicon
+    ) == (gv.DEFAULT_WEIGHT)
+    assert (
+        gv.concreteness([("the", "the", "DET", False), ("dog", "dog", "NOUN", False)], lexicon)
+        == 4.5
+    )
 
 
 def test_penalty_keeps_grounded_and_shifts_ungrounded():
@@ -133,7 +145,7 @@ def _setup(tmp_path, story_dict, generated_dict, monkeypatch, stories, threshold
     write_jsonl(tmp_path / "gens.jsonl", gens)
     images = story_dict["images"]
     backend = FakeBackend(
-        chunks={"A dog.": [_tok("a dog")], "It ran.": [[("it", "it", "PRON")]]},
+        chunks={"A dog.": [_tok("a dog")], "It ran.": [[("it", "it", "PRON", True)]]},
         texts={"a dog": [1.0, 0.0]},
         regions={images[0]: [_cos_vec(0.3)], images[1]: [_cos_vec(0.32)], images[2]: [[0, 1]]},
     )
@@ -159,7 +171,7 @@ def test_evaluate_scores_groovist_and_leaves_no_phrase_stories_empty(
     )
     with evaluate(cfg, [gens]).open(encoding="utf-8", newline="") as f:
         rows = {r["id"]: r["groovist"] for r in csv.DictReader(f)}
-    assert float(rows["s1"]) == pytest.approx(math.tanh(3.0 * 2.5 * 0.32))
+    assert float(rows["s1"]) == pytest.approx(math.tanh(5.0 * 2.5 * 0.32))
     assert rows["s2"] == ""
     assert sorted(set(backend.region_calls)) == sorted(story_dict["images"])
 
@@ -200,9 +212,9 @@ def test_evaluate_writes_one_row_per_phrase_and_replaces_it_each_run(
     row = rows[0]
     assert (row["id"], row["phrase"], row["grounded"]) == ("s1", "a dog", True)
     assert row["model"] == generated_dict["model"] and row["adapter"] is None
-    assert row["weight"] == 3.0
+    assert row["weight"] == 5.0
     assert row["alignment"] == pytest.approx(0.8)
-    assert row["value"] == pytest.approx(2.4)
+    assert row["value"] == pytest.approx(4.0)
 
 
 def test_evaluate_removes_old_phrase_file_when_groovist_is_not_asked(
