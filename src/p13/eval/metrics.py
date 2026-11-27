@@ -296,6 +296,9 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool
        :data:`GROUP_COLUMNS` + one column per corpus metric. Otherwise an old
        ``system_scores.csv`` is removed, so the two files always come from the same run.
 
+    Before scoring, the per-run side files (:data:`RUN_SIDE_FILES`, e.g. GROOViST's
+    per-phrase scores) are removed, so they always come from the same run as ``scores.csv``.
+
     Returns the path of ``scores.csv``.
     """
     names = _check_metric_names(cfg.eval.metrics)
@@ -316,6 +319,8 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool
     if with_human:
         groups = _add_human_groups(groups, refs)
     human_of = _check_dhm_inputs(names, groups) if derived_names else {}
+    for side_file in RUN_SIDE_FILES:
+        (cfg.run_dir / side_file).unlink(missing_ok=True)
 
     all_scores: dict[Group, dict[str, Scores]] = {}
     for group, gens in groups.items():
@@ -544,6 +549,8 @@ METRICS: dict[str, Callable[[list[GeneratedStory], Refs, ExperimentConfig], Scor
 CORPUS_METRICS: dict[str, Callable[[list[GeneratedStory]], float]] = {
     "distinct_2": distinct_2,
 }
+
+RUN_SIDE_FILES: tuple[str, ...] = ("groovist_phrases.jsonl",)
 
 HUMAN_MODEL = "human"
 HUMAN_PROMPT_ID = "reference"

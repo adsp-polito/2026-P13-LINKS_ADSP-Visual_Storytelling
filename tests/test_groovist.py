@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 
 import numpy as np
@@ -179,3 +180,43 @@ def test_threshold_config_is_a_mapping_of_known_datasets():
     for bad in ["{coco: 0.6}", "0.6", "{vist: high}"]:
         with pytest.raises(ConfigError):
             load_config("configs/e0_zeroshot.yaml", [f"eval.groovist_threshold={bad}"])
+
+
+def _phrase_rows(cfg):
+    path = cfg.run_dir / gv.PHRASES_FILE
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_evaluate_writes_one_row_per_phrase_and_replaces_it_each_run(
+    tmp_path, story_dict, generated_dict, monkeypatch
+):
+    cfg, gens, _ = _setup(
+        tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog.", "s2": "It ran."}
+    )
+    evaluate(cfg, [gens])
+    evaluate(cfg, [gens])
+    rows = _phrase_rows(cfg)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["id"], row["phrase"], row["grounded"]) == ("s1", "a dog", True)
+    assert row["model"] == generated_dict["model"] and row["adapter"] is None
+    assert row["weight"] == 3.0
+    assert row["alignment"] == pytest.approx(0.8)
+    assert row["value"] == pytest.approx(2.4)
+
+
+def test_evaluate_removes_old_phrase_file_when_groovist_is_not_asked(
+    tmp_path, story_dict, generated_dict, monkeypatch
+):
+    cfg, gens, _ = _setup(tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog."})
+    evaluate(cfg, [gens])
+    assert (cfg.run_dir / gv.PHRASES_FILE).exists()
+    cfg.eval.metrics = ["length"]
+    evaluate(cfg, [gens])
+    assert not (cfg.run_dir / gv.PHRASES_FILE).exists()
+
+
+def test_phrase_file_name_is_a_run_side_file():
+    from p13.eval import metrics
+
+    assert gv.PHRASES_FILE in metrics.RUN_SIDE_FILES

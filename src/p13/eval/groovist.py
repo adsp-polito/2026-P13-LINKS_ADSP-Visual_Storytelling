@@ -14,12 +14,16 @@ Clean reimplementation of https://github.com/akskuchi/groovist with our own regi
    (the word, else its lemma; words not in the list are skipped; 1.0 if none is found).
 6. Story score = tanh(mean over phrases of weight · penalised alignment), in (−1, 1).
    A story without noun phrases gets no score.
+
+Every phrase of every scored story is also written to ``<run_dir>/groovist_phrases.jsonl``
+for error analysis.
 """
 
 from __future__ import annotations
 
 import csv
 import functools
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -36,6 +40,7 @@ log = logging.getLogger(__name__)
 SCALE = 2.5
 DEFAULT_WEIGHT = 1.0
 NMS_IOU = 0.5
+PHRASES_FILE = "groovist_phrases.jsonl"
 PLACEHOLDERS = {
     "[male]": "male",
     "[female]": "female",
@@ -137,12 +142,42 @@ def score(
     backend = load_backend(cfg)
     lexicon = load_lexicon(cfg.eval.concreteness_file)
     scores: dict[Any, float] = {}
+    rows: list[dict[str, Any]] = []
     for g in gens:
+        theta = cfg.eval.groovist_threshold[g.dataset]
         phrases = story_phrases(g.story, refs[g.key].images, backend, lexicon)
-        value = story_score(phrases, cfg.eval.groovist_threshold[g.dataset])
+        value = story_score(phrases, theta)
         if not math.isnan(value):
             scores[g.key] = value
+        rows.extend(phrase_rows(g, phrases, theta))
+    append_phrase_rows(cfg.run_dir / PHRASES_FILE, rows)
     return scores
+
+
+def phrase_rows(g: GeneratedStory, phrases: list[Phrase], theta: float) -> list[dict[str, Any]]:
+    """One row per noun phrase, for error analysis (lowest ``value`` = least grounded)."""
+    return [
+        {
+            "dataset": g.dataset,
+            "split": g.split,
+            "id": g.id,
+            "model": g.model,
+            "adapter": g.adapter,
+            "prompt_id": g.prompt_id,
+            "phrase": p.text,
+            "weight": p.weight,
+            "alignment": p.alignment,
+            "grounded": p.alignment >= theta,
+            "value": p.weight * penalise(p.alignment, theta),
+        }
+        for p in phrases
+    ]
+
+
+def append_phrase_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
 
 
 def select_boxes(
