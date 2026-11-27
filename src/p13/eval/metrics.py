@@ -64,7 +64,7 @@ def _todo(name: str) -> NotImplementedError:
 # ---------------------------------------------------------------- headline
 
 
-def groovist(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def groovist(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """GROOViST (Surikuchi et al., EMNLP 2023): visual grounding. Reference-free.
 
     CLIP matches the story's noun phrases to image regions across the **whole** sequence
@@ -76,13 +76,13 @@ def groovist(gens: list[GeneratedStory], refs: Refs) -> Scores:
     raise _todo("groovist")
 
 
-def rovist_c(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def rovist_c(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """RoViST-C (Wang et al., Findings NAACL 2022): coherence from ALBERT **sentence-order
     prediction** over consecutive sentences. Reference-free."""
     raise _todo("rovist_c")
 
 
-def rovist_nr(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def rovist_nr(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """RoViST-NR: non-redundancy in [0, 1]; higher = less repetition. Reference-free.
 
     Clean version of RoViST's idea (not a copy of the authors' code): words are lower-cased
@@ -135,20 +135,20 @@ def derive_dhm(
     return out
 
 
-def halluc_any(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def halluc_any(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """1 if ``halluc_ner`` or the object check finds at least one hallucination, else 0.
     Its mean over a group is the **hallucination rate** used in the decision rule."""
     raise _todo("halluc_any")
 
 
-def halluc_ner(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def halluc_ner(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """Count of invented names / places / specific dates per story (spaCy NER: PERSON;
     GPE / LOC / FAC; DATE only for specific dates such as years or calendar dates, not vague
     phrases like "the weekend")."""
     raise _todo("halluc_ner")
 
 
-def halluc_obj_share(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def halluc_obj_share(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """Share of mentioned objects (spaCy nouns) that an open-vocabulary detector
     (OWLv2 / Grounding DINO) doesn't find in any image of the sequence (CHAIR-style).
 
@@ -159,7 +159,7 @@ def halluc_obj_share(gens: list[GeneratedStory], refs: Refs) -> Scores:
     raise _todo("halluc_obj_share")
 
 
-def n_objects(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def n_objects(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """Number of objects (spaCy nouns) the story mentions: the denominator of
     ``halluc_obj_share``. A count the report needs for pooling, not a score."""
     raise _todo("n_objects")
@@ -168,7 +168,7 @@ def n_objects(gens: list[GeneratedStory], refs: Refs) -> Scores:
 # ---------------------------------------------------------------- supporting
 
 
-def clipscore(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def clipscore(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """CLIPScore, a second grounding signal. Reference-free.
 
     Split the story into sentences, score each sentence against its **best-matching** image
@@ -195,12 +195,12 @@ def distinct_2(gens: list[GeneratedStory]) -> float:
     return len(unique) / total if total else 0.0
 
 
-def length(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def length(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """Story length in words (P1 asks for 50–100). Punctuation is not counted."""
     return {g.key: float(len(_words(g.story))) for g in gens}
 
 
-def reading_grade(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def reading_grade(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """Flesch–Kincaid grade level (e.g. via ``textstat``)."""
     raise _todo("reading_grade")
 
@@ -208,28 +208,28 @@ def reading_grade(gens: list[GeneratedStory], refs: Refs) -> Scores:
 # ---------------------------------------------------------------- comparability
 
 
-def bleu4(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def bleu4(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """BLEU-4 vs the cleaned reference (one ``pycocoevalcap`` call with METEOR, CIDEr,
     ROUGE-L). Comparability only."""
     raise _todo("bleu4")
 
 
-def meteor(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def meteor(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """METEOR vs the cleaned reference. Comparability only."""
     raise _todo("meteor")
 
 
-def cider(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def cider(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """CIDEr-D vs the cleaned reference. Needs the whole group for its IDF. Comparability only."""
     raise _todo("cider")
 
 
-def rouge_l(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def rouge_l(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """ROUGE-L F1 vs the cleaned reference. Comparability only."""
     raise _todo("rouge_l")
 
 
-def bertscore(gens: list[GeneratedStory], refs: Refs) -> Scores:
+def bertscore(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
     """BERTScore F1 vs the cleaned reference (roberta-large, baseline rescaling).
     Comparability only."""
     raise _todo("bertscore")
@@ -321,7 +321,7 @@ def evaluate(cfg: ExperimentConfig, story_files: list[Path], *, with_human: bool
         log.info("scoring %d stories for %s", len(gens), _group_label(group))
         is_human = group[0] == HUMAN_MODEL
         all_scores[group] = {
-            name: {} if is_human and name in REFERENCE_METRICS else METRICS[name](gens, refs)
+            name: {} if is_human and name in REFERENCE_METRICS else METRICS[name](gens, refs, cfg)
             for name in metric_names
         }
     for group, human_group in human_of.items():
@@ -521,7 +521,7 @@ def _write_csv(path: Path, columns: list[str], rows: list[dict[str, object]]) ->
         raise
 
 
-METRICS: dict[str, Callable[[list[GeneratedStory], Refs], Scores]] = {
+METRICS: dict[str, Callable[[list[GeneratedStory], Refs, ExperimentConfig], Scores]] = {
     "groovist": groovist,
     "rovist_c": rovist_c,
     "rovist_nr": rovist_nr,

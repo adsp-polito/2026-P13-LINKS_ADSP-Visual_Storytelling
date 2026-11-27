@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from p13.common.config import load_config
+from p13.common.config import ExperimentConfig, load_config
 from p13.common.jsonl import write_jsonl
 from p13.common.schema import GeneratedStory, StoryRecord
 from p13.eval import metrics
@@ -49,8 +49,11 @@ def _g(generated_dict, story):
 
 def test_length_counts_words_not_punctuation(generated_dict):
     key = ("vist", "val", "s1")
-    assert length([_g(generated_dict, "The dog ran . It's happy!")], {})[key] == 5.0
-    assert length([_g(generated_dict, "")], {})[key] == 0.0
+    assert (
+        length([_g(generated_dict, "The dog ran . It's happy!")], {}, ExperimentConfig())[key]
+        == 5.0
+    )
+    assert length([_g(generated_dict, "")], {}, ExperimentConfig())[key] == 0.0
 
 
 def test_distinct_2_is_over_all_stories(generated_dict):
@@ -105,7 +108,7 @@ def test_evaluate_never_pools_datasets(tmp_path, story_dict, generated_dict, mon
     aesop = _gens(tmp_path, generated_dict, "aesop.jsonl", ids=("s1",), dataset="aesop")
     calls = []
 
-    def fake(gens, refs):
+    def fake(gens, refs, cfg):
         calls.append({g.dataset for g in gens})
         return {g.key: 1.0 for g in gens}
 
@@ -124,7 +127,7 @@ def test_evaluate_keeps_systems_apart(tmp_path, story_dict, generated_dict, monk
     lora = _gens(tmp_path, generated_dict, "lora.jsonl", adapter="outputs/E1/adapter")
     calls = []
 
-    def fake(gens, refs):
+    def fake(gens, refs, cfg):
         calls.append({g.adapter for g in gens})
         return {g.key: 1.0 for g in gens}
 
@@ -168,7 +171,7 @@ def test_evaluate_leaves_cell_empty_for_missing_score(
     _refs(tmp_path, story_dict)
     gens = _gens(tmp_path, generated_dict)
 
-    def partial(gens, refs):
+    def partial(gens, refs, cfg):
         return {gens[0].key: 0.5, gens[1].key: math.nan}
 
     monkeypatch.setitem(metrics.METRICS, "length", partial)
@@ -227,7 +230,7 @@ DHM_NAMES = ["groovist", "rovist_c", "rovist_nr", "dhm_g", "dhm_c", "dhm_nr", "d
 def _fake_base_metrics(monkeypatch, calls=None):
     """groovist / rovist_c / rovist_nr = word count / 100, so scores differ by story text."""
 
-    def fake(gens, refs):
+    def fake(gens, refs, cfg):
         if calls is not None:
             calls.append(gens[0].model)
         return {g.key: len(g.story.split()) / 100 for g in gens}
@@ -303,7 +306,9 @@ def test_evaluate_halluc_obj_share_needs_n_objects(tmp_path):
 
 
 def _nr(generated_dict, story):
-    return metrics.rovist_nr([_g(generated_dict, story)], {}).get(("vist", "val", "s1"))
+    return metrics.rovist_nr([_g(generated_dict, story)], {}, ExperimentConfig()).get(
+        ("vist", "val", "s1")
+    )
 
 
 def test_rovist_nr_no_repetition_scores_one(generated_dict):
@@ -399,7 +404,7 @@ def test_evaluate_with_human_adds_one_human_group(
     lora = _gens(tmp_path, generated_dict, "lora.jsonl", adapter="outputs/E1/adapter")
     called_for = []
 
-    def fake_bleu4(gens, refs):
+    def fake_bleu4(gens, refs, cfg):
         called_for.extend(g.model for g in gens)
         return {g.key: 0.5 for g in gens}
 
