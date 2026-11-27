@@ -65,15 +65,16 @@ def _todo(name: str) -> NotImplementedError:
 
 
 def groovist(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
-    """GROOViST (Surikuchi et al., EMNLP 2023): visual grounding. Reference-free.
+    """GROOViST (Surikuchi et al., EMNLP 2023): visual grounding in (−1, 1). Reference-free.
 
-    CLIP matches the story's noun phrases to image regions across the **whole** sequence
-    (order-independent); phrases under the threshold count negatively; scores are weighted
-    by word **concreteness**. The threshold is fixed per dataset from the **reference**
-    stories, read from config (never hard-coded) and reused for every model. Keep the
-    per-phrase scores for error analysis.
+    Noun phrases are matched with CLIP to OWLv2 regions of all images of the sequence
+    (order-independent), penalised under the per-dataset threshold
+    ``eval.groovist_threshold`` and weighted by concreteness. A story without noun phrases
+    gets no score. Details in :mod:`p13.eval.groovist`.
     """
-    raise _todo("groovist")
+    from p13.eval import groovist as gv
+
+    return gv.score(gens, refs, cfg)
 
 
 def rovist_c(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:

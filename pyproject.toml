@@ -33,6 +33,8 @@ train = [
     "wandb>=0.19",
 ]
 eval = [
+    "torch>=2.4",
+    "transformers>=4.57",
     "evaluate>=0.4",
     "nltk>=3.9",
     "pycocoevalcap>=1.2",

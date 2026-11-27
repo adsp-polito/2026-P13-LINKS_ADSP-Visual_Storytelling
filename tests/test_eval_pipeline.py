@@ -183,7 +183,7 @@ def test_evaluate_stub_metric_raises_not_implemented(tmp_path, story_dict, gener
     _refs(tmp_path, story_dict)
     gens = _gens(tmp_path, generated_dict)
     with pytest.raises(NotImplementedError):
-        evaluate(_cfg(tmp_path, ["length", "groovist"]), [gens])
+        evaluate(_cfg(tmp_path, ["length", "bleu4"]), [gens])
 
 
 def test_metrics_have_the_evaluation_md_names():

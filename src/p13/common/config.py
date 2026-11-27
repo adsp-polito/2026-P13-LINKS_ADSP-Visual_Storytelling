@@ -139,6 +139,13 @@ class EvalSection:
     bootstrap_samples: int = 1000
     ci_level: float = 0.95
     allow_test: bool = False
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+    spacy_model: str = "en_core_web_trf"
+    clip_model: str = "openai/clip-vit-base-patch32"
+    region_model: str = "google/owlv2-base-patch16-ensemble"
+    regions_per_image: int = 10
+    concreteness_file: str = "data/raw/concreteness/brysbaert2014.tsv"
+    groovist_threshold: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -256,6 +263,10 @@ def _coerce(tp: Any, value: Any, where: str) -> Any:
             return None
         inner = [a for a in args if a is not type(None)]
         return _coerce(inner[0], value, where)
+    if origin is dict:
+        if not isinstance(value, dict):
+            raise ConfigError(f"{where}: expected a mapping, got {value!r}")
+        return {_coerce(args[0], k, where): _coerce(args[1], v, where) for k, v in value.items()}
     if origin is list:
         if not isinstance(value, list):
             raise ConfigError(f"{where}: expected a list, got {value!r}")
@@ -285,5 +296,12 @@ def _sanity_check(cfg: ExperimentConfig) -> None:
         raise ConfigError("data.max_image_side must be > 0")
     if cfg.train.per_device_batch_size < 1 or cfg.train.grad_accum < 1:
         raise ConfigError("train.per_device_batch_size and train.grad_accum must be >= 1")
+    bad = [d for d in cfg.eval.groovist_threshold if d not in DATASETS]
+    if bad:
+        raise ConfigError(
+            f"eval.groovist_threshold: unknown dataset(s) {bad}; expected {list(DATASETS)}"
+        )
+    if cfg.eval.regions_per_image < 0:
+        raise ConfigError("eval.regions_per_image must be >= 0")
     if cfg.hub.push_adapter and not cfg.hub.repo_id:
         raise ConfigError("hub.push_adapter is true but hub.repo_id is empty")

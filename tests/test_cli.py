@@ -67,7 +67,7 @@ def test_eval_stub_metric_exits_cleanly(tmp_path, story_dict, generated_dict):
     write_jsonl(tmp_path / "processed" / "vist_val.jsonl", [StoryRecord(**story_dict)])
     path = tmp_path / "stories.jsonl"
     write_jsonl(path, [GeneratedStory.model_validate(generated_dict)])
-    assert cli.eval_main(_eval_args(tmp_path, path, "length,groovist")) == 2
+    assert cli.eval_main(_eval_args(tmp_path, path, "length,bleu4")) == 2
 
 
 def _write_one(tmp_path, story_dict, generated_dict, split="val", **gen_fields):
