@@ -1,7 +1,10 @@
-"""Fixed dev subsets (default: 200 sequences per dataset, seed 42).
+"""Fixed story subsets: committed id lists in ``data/splits/``.
 
-The ID list is written once to ``data/splits/<dataset>_<split>_dev<N>.txt`` and committed,
-so every teammate evaluates on exactly the same sequences.
+A list is named ``<dataset>_<split>_<tag>.txt``. The dev lists (tag ``dev<N>``, default
+200 stories, seed 42) are written once by ``p13-prepare``; other tags (``1010``, ``791``)
+name fixed evaluation lists. Lists are committed, so every teammate uses exactly the same
+stories. :func:`load_subset_records` is the one place that turns ``data.subset`` into
+records, for generation and evaluation alike.
 """
 
 from __future__ import annotations
@@ -10,7 +13,9 @@ import random
 from collections.abc import Iterable
 from pathlib import Path
 
-from p13.common.config import DEFAULT_SEED
+from p13.common.config import DEFAULT_SEED, SUBSET_TAG_RE, ExperimentConfig
+from p13.common.jsonl import read_jsonl
+from p13.common.schema import StoryRecord
 
 
 def sample_ids(ids: Iterable[str], n: int = 200, seed: int = DEFAULT_SEED) -> list[str]:
@@ -23,6 +28,44 @@ def sample_ids(ids: Iterable[str], n: int = 200, seed: int = DEFAULT_SEED) -> li
 
 def subset_path(splits_dir: str | Path, dataset: str, split: str, n: int = 200) -> Path:
     return Path(splits_dir) / f"{dataset}_{split}_dev{n}.txt"
+
+
+def subset_file(splits_dir: str | Path, dataset: str, split: str, tag: str) -> Path:
+    """``<splits_dir>/<dataset>_<split>_<tag>.txt``; ``tag`` is e.g. ``dev200`` or ``1010``."""
+    if not SUBSET_TAG_RE.fullmatch(tag):
+        raise ValueError(f"bad subset tag {tag!r}: use a-z and 0-9, not starting with 0")
+    return Path(splits_dir) / f"{dataset}_{split}_{tag}.txt"
+
+
+def load_subset_records(cfg: ExperimentConfig, dataset: str) -> list[StoryRecord]:
+    """Stories of ``dataset`` / ``cfg.data.split`` selected by ``cfg.data.subset``.
+
+    ``"full"`` returns every record of the JSONL file. Any other tag returns the records
+    listed in :func:`subset_file`, in list order. Raises if the JSONL or the list file is
+    missing, or if the list names an id that is not in the JSONL file.
+    """
+    split = cfg.data.split
+    jsonl_path = Path(cfg.data.jsonl_dir) / f"{dataset}_{split}.jsonl"
+    if not jsonl_path.is_file():
+        raise FileNotFoundError(
+            f"{jsonl_path} not found; run p13-prepare or unpack the processed JSONL first"
+        )
+    records = read_jsonl(jsonl_path, StoryRecord)
+    if cfg.data.subset == "full":
+        return records
+    ids_path = subset_file(cfg.data.splits_dir, dataset, split, cfg.data.subset)
+    if not ids_path.is_file():
+        raise FileNotFoundError(
+            f"{ids_path} not found; run p13-prepare first or use --set data.subset=full"
+        )
+    by_id = {r.id: r for r in records}
+    want = read_ids(ids_path)
+    missing = [i for i in want if i not in by_id]
+    if missing:
+        raise RuntimeError(
+            f"{ids_path} lists {len(missing)} id(s) missing from {jsonl_path} (e.g. {missing[0]})"
+        )
+    return [by_id[i] for i in want]
 
 
 def write_ids(path: str | Path, ids: list[str]) -> None:

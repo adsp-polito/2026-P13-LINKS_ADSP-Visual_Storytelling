@@ -1,9 +1,10 @@
 import random
 
 import numpy as np
+import pytest
 
 from p13.common.seed import set_seed
-from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
+from p13.common.subset import read_ids, sample_ids, subset_file, subset_path, write_ids
 
 
 def test_set_seed_is_reproducible():
@@ -30,3 +31,14 @@ def test_id_file_round_trip(tmp_path):
     assert path.name == "vist_val_dev200.txt"
     write_ids(path, ["1", "2"])
     assert read_ids(path) == ["1", "2"]
+
+
+def test_subset_file_uses_the_tag(tmp_path):
+    assert subset_file(tmp_path, "vist", "test", "1010").name == "vist_test_1010.txt"
+    assert subset_file(tmp_path, "vwp", "val", "dev200") == subset_path(tmp_path, "vwp", "val")
+
+
+@pytest.mark.parametrize("tag", ["../x", "Dev200", "dev_200", "0710", ""])
+def test_subset_file_rejects_bad_tags(tmp_path, tag):
+    with pytest.raises(ValueError, match="bad subset tag"):
+        subset_file(tmp_path, "vist", "val", tag)

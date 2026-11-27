@@ -74,7 +74,7 @@ def _write_fixture_split(
                 "jsonl_dir": str(root / "processed"),
                 "image_dir": str(root / "images"),
                 "splits_dir": str(root / "splits"),
-                "subset": "dev200" if dev_ids is not None else "full",
+                "subset": "dev2" if dev_ids is not None else "full",
                 "dev_subset_size": 2,
                 "max_image_side": 448,
             },
@@ -157,6 +157,21 @@ def test_load_split_records_filters_dev_subset_in_order(tmp_path):
 def test_load_split_records_raises_if_dev_id_missing(tmp_path):
     cfg = _write_fixture_split(tmp_path, story_ids=["s1", "s2"], dev_ids=["s1", "s999"])
     with pytest.raises(RuntimeError, match="s999"):
+        load_split_records(cfg, "vist")
+
+
+def test_load_split_records_uses_any_subset_tag(tmp_path):
+    cfg = _write_fixture_split(tmp_path, story_ids=["s1", "s2", "s3"], dev_ids=None)
+    write_ids(tmp_path / "splits" / "vist_val_1010.txt", ["s2", "s1"])
+    cfg.data.subset = "1010"
+    assert [r.id for r in load_split_records(cfg, "vist")] == ["s2", "s1"]
+
+
+def test_load_split_records_full_and_missing_list(tmp_path):
+    cfg = _write_fixture_split(tmp_path, story_ids=["s1", "s2"], dev_ids=None)
+    assert [r.id for r in load_split_records(cfg, "vist")] == ["s1", "s2"]
+    cfg.data.subset = "791"
+    with pytest.raises(FileNotFoundError, match=r"data\.subset=full"):
         load_split_records(cfg, "vist")
 
 

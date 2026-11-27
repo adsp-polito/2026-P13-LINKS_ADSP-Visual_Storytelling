@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from p13.common.config import ConfigError, load_config
+from p13.common.config import ConfigError, load_config, parse_config_dict
 from p13.common.prompts import get_prompt
 
 CONFIGS = sorted(p for p in Path("configs").glob("e*.yaml"))
@@ -47,13 +47,26 @@ def test_overrides():
         "model.nmae=x",
         "model.load_in_4bit=yes-please",
         "data.datasets=[coco]",
-        "data.subset=half",
+        "data.subset=../x",
+        "data.subset=Dev200",
+        "data.subset=true",
         "no_equals_sign",
     ],
 )
 def test_bad_values_rejected(override):
     with pytest.raises(ConfigError):
         load_config("configs/e0_zeroshot.yaml", [override])
+
+
+@pytest.mark.parametrize("tag", ["1010", "791", "dev200", "full"])
+def test_subset_tag_override(tag):
+    # YAML reads 1010 and 791 as numbers; they must still become the text tag.
+    cfg = load_config("configs/e0_zeroshot.yaml", [f"data.subset={tag}"])
+    assert cfg.data.subset == tag
+
+
+def test_unquoted_number_subset_in_yaml():
+    assert parse_config_dict({"data": {"subset": 791}}).data.subset == "791"
 
 
 def test_prompts_text():

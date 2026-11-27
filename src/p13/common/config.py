@@ -16,6 +16,7 @@ Any key can also be overridden on the command line::
 from __future__ import annotations
 
 import dataclasses
+import re
 import types
 import typing
 from dataclasses import dataclass, field
@@ -25,6 +26,10 @@ from typing import Any, Literal
 import yaml
 
 DEFAULT_SEED = 42
+
+# A subset tag names an id list data/splits/<dataset>_<split>_<tag>.txt (dev200, 1010, 791).
+# No leading 0: YAML reads "0710" as the octal number 456.
+SUBSET_TAG_RE = re.compile(r"[a-z1-9][a-z0-9]*")
 
 
 @dataclass
@@ -53,8 +58,17 @@ class DataSection:
     image_dir: str = "data/images"
     splits_dir: str = "data/splits"
     max_image_side: int = 448
-    subset: Literal["dev200", "full"] = "dev200"
-    dev_subset_size: int = 200
+    # "full" = every story; any other tag = only the ids in
+    # data/splits/<dataset>_<split>_<tag>.txt (see p13.common.subset.load_subset_records).
+    subset: str = "dev200"
+    dev_subset_size: int = 200  # size of the dev list that p13-prepare writes
+
+    def __post_init__(self) -> None:
+        if not SUBSET_TAG_RE.fullmatch(self.subset):
+            raise ConfigError(
+                f"data.subset: {self.subset!r} must be 'full' or a tag of a-z and 0-9 "
+                "that does not start with 0 (e.g. dev200, 1010)"
+            )
 
 
 @dataclass
@@ -270,6 +284,8 @@ def _coerce(tp: Any, value: Any, where: str) -> Any:
         return value
     if tp is str and isinstance(value, str):
         return value
+    if tp is str and isinstance(value, int) and not isinstance(value, bool):
+        return str(value)  # YAML reads --set data.subset=1010 as the int 1010
     if tp is Any:
         return value
     raise ConfigError(f"{where}: expected {getattr(tp, '__name__', tp)}, got {value!r}")
