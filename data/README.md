@@ -17,6 +17,10 @@ data/splits/               dev-200 id lists: <dataset>_<split>_dev200.txt – CO
 | VWP | Movie shots | 5–9 | SIS | https://huggingface.co/datasets/tonyhong/vwp (v2.1) – see `download_vwp.py` |
 | AESOP | Clip-art panels | 3 | SIS | TODO |
 
+Eval resource: `python data/download_concreteness.py` writes the Brysbaert et al. (2014)
+concreteness ratings (official supplementary .xlsx, converted) to
+`data/raw/concreteness/brysbaert2014.tsv` for GROOViST.
+
 DII = descriptions of images in isolation · DIS = descriptions of images in sequence ·
 SIS = stories of images in sequence (our training target).
 
