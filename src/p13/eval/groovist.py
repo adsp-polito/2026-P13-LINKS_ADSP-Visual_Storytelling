@@ -33,7 +33,9 @@ from typing import Any, Protocol
 import numpy as np
 
 from p13.common.config import ExperimentConfig
+from p13.common.jsonl import read_jsonl
 from p13.common.schema import GeneratedStory, StoryRecord
+from p13.common.subset import read_ids, subset_path
 
 log = logging.getLogger(__name__)
 
@@ -117,17 +119,29 @@ def story_score(phrases: list[Phrase], theta: float) -> float:
 def story_phrases(
     story: str, images: list[str], backend: Backend, lexicon: dict[str, float]
 ) -> list[Phrase]:
+    return story_phrases_on(story, [images], backend, lexicon)[0]
+
+
+def story_phrases_on(
+    story: str, image_sets: list[list[str]], backend: Backend, lexicon: dict[str, float]
+) -> list[list[Phrase]]:
+    """The story's phrases aligned with each image set in turn (the story is parsed once)."""
     chunks = select_phrases(backend.noun_chunks(clean_text(story)))
     if not chunks:
-        return []
+        return [[] for _ in image_sets]
     texts = [" ".join(word for word, _, _ in chunk) for chunk in chunks]
-    alignments = max_alignments(
-        backend.embed_texts(texts), [backend.embed_regions(path) for path in images]
-    )
-    return [
-        Phrase(text, concreteness(chunk, lexicon), float(a))
-        for text, chunk, a in zip(texts, chunks, alignments, strict=True)
-    ]
+    weights = [concreteness(chunk, lexicon) for chunk in chunks]
+    embs = backend.embed_texts(texts)
+    out = []
+    for images in image_sets:
+        alignments = max_alignments(embs, [backend.embed_regions(path) for path in images])
+        out.append(
+            [
+                Phrase(text, w, float(a))
+                for text, w, a in zip(texts, weights, alignments, strict=True)
+            ]
+        )
+    return out
 
 
 def score(
@@ -178,6 +192,115 @@ def append_phrase_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+
+
+CALIBRATION_FILE = "groovist_threshold.json"
+
+
+def calibrate(cfg: ExperimentConfig) -> Path:
+    """Fix θ per dataset from the reference stories and check that GROOViST sees grounding.
+
+    For every dataset in ``data.datasets`` on ``data.split`` (the eval set: the dev subset
+    if ``data.subset`` is ``dev200``), θ = mean alignment (2.5 · max cosine) of all noun
+    phrases of the reference stories. Check: each reference story is also aligned with the
+    images of the next story (sorted by id) that shares no image with it; its own images
+    should score clearly higher. Writes ``<run_dir>/groovist_threshold.json`` and logs the
+    ``eval.groovist_threshold`` value to put in the config.
+    """
+    if cfg.data.split == "test":
+        raise ValueError("calibrate GROOViST on val, never on the test split")
+    backend = load_backend(cfg)
+    lexicon = load_lexicon(cfg.eval.concreteness_file)
+    report = {
+        dataset: calibrate_dataset(eval_references(cfg, dataset), backend, lexicon)
+        for dataset in cfg.data.datasets
+    }
+    out = cfg.run_dir / CALIBRATION_FILE
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    for dataset, r in report.items():
+        log.info(
+            "groovist %s: θ=%.4f from %d phrases in %d stories; own images %.3f vs other "
+            "%.3f (own wins %.0f%% of %d stories)",
+            dataset,
+            r["theta"],
+            r["n_phrases"],
+            r["n_stories"],
+            r["own_mean_score"],
+            r["other_mean_score"],
+            100 * r["own_wins_share"],
+            r["n_compared"],
+        )
+    thresholds = ", ".join(f"{d}: {r['theta']:.4f}" for d, r in report.items())
+    log.info("put in the config: eval.groovist_threshold: {%s}", thresholds)
+    log.info("wrote %s", out)
+    return out
+
+
+def calibrate_dataset(
+    refs: list[StoryRecord], backend: Backend, lexicon: dict[str, float]
+) -> dict[str, Any]:
+    refs = sorted(refs, key=lambda r: r.id)
+    partners = [_partner(refs, i) for i in range(len(refs))]
+    own: list[list[Phrase]] = []
+    other: list[list[Phrase] | None] = []
+    for ref, partner in zip(refs, partners, strict=True):
+        image_sets = [ref.images] if partner is None else [ref.images, partner.images]
+        aligned = story_phrases_on(ref.story, image_sets, backend, lexicon)
+        own.append(aligned[0])
+        other.append(aligned[1] if partner is not None else None)
+    alignments = [p.alignment for phrases in own for p in phrases]
+    if not alignments:
+        raise ValueError(f"no noun phrases in {len(refs)} reference stories: cannot fix θ")
+    theta = sum(alignments) / len(alignments)
+    pairs = [
+        (story_score(o, theta), story_score(m, theta))
+        for o, m in zip(own, other, strict=True)
+        if o and m
+    ]
+    return {
+        "theta": theta,
+        "n_stories": len(refs),
+        "n_phrases": len(alignments),
+        "n_compared": len(pairs),
+        "own_mean_score": _mean([o for o, _ in pairs]),
+        "other_mean_score": _mean([m for _, m in pairs]),
+        "own_wins_share": _mean([float(o > m) for o, m in pairs]),
+    }
+
+
+def eval_references(cfg: ExperimentConfig, dataset: str) -> list[StoryRecord]:
+    path = Path(cfg.data.jsonl_dir) / f"{dataset}_{cfg.data.split}.jsonl"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} not found: the reference stories of {dataset} are needed "
+            "(run p13-prepare, or limit data.datasets)"
+        )
+    refs = read_jsonl(path, StoryRecord)
+    if cfg.data.subset != "dev200":
+        return refs
+    ids_path = subset_path(cfg.data.splits_dir, dataset, cfg.data.split, cfg.data.dev_subset_size)
+    if not ids_path.is_file():
+        raise FileNotFoundError(f"{ids_path} not found: use --set data.subset=full")
+    by_id = {r.id: r for r in refs}
+    ids = read_ids(ids_path)
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise ValueError(f"{ids_path}: {len(missing)} ids not in {path} (e.g. {missing[0]})")
+    return [by_id[i] for i in ids]
+
+
+def _partner(refs: list[StoryRecord], i: int) -> StoryRecord | None:
+    own = set(refs[i].images)
+    for step in range(1, len(refs)):
+        candidate = refs[(i + step) % len(refs)]
+        if own.isdisjoint(candidate.images):
+            return candidate
+    return None
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else math.nan
 
 
 def select_boxes(

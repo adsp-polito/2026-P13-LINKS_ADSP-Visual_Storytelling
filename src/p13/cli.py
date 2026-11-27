@@ -4,6 +4,7 @@
     p13-generate --config CFG                                stories (adapter OFF or ON)
     p13-train    --config CFG                                LoRA / QLoRA adapter
     p13-eval     --config CFG --stories FILE [FILE ...] [--with-human]   metrics → scores CSV
+    p13-eval     --config CFG --calibrate-groovist        GROOViST threshold per dataset
 
 Common flags: ``--set key.sub=value`` (repeatable) to override the config,
 ``--dry-run`` to print the resolved config and exit.
@@ -112,6 +113,11 @@ def train_main(argv: list[str] | None = None) -> int:
 
 
 def _eval(cfg: ExperimentConfig, args: argparse.Namespace) -> None:
+    if args.calibrate_groovist:
+        from p13.eval.groovist import calibrate
+
+        calibrate(cfg)
+        return
     from p13.eval.metrics import evaluate
 
     evaluate(cfg, args.stories, with_human=args.with_human)
@@ -119,19 +125,27 @@ def _eval(cfg: ExperimentConfig, args: argparse.Namespace) -> None:
 
 def eval_main(argv: list[str] | None = None) -> int:
     p = _parser("p13-eval", "Score generated stories (GeneratedStory JSONL).")
-    p.add_argument(
+    what = p.add_mutually_exclusive_group(required=True)
+    what.add_argument(
         "--stories",
         nargs="+",
         type=Path,
-        required=True,
         help="every story file of the experiment in one call: each run replaces scores.csv",
+    )
+    what.add_argument(
+        "--calibrate-groovist",
+        action="store_true",
+        help="fix eval.groovist_threshold per dataset from the reference stories and exit",
     )
     p.add_argument(
         "--with-human",
         action="store_true",
         help='also score the reference stories as the human baseline (model="human")',
     )
-    return _run(p.parse_args(argv), "eval", _eval)
+    args = p.parse_args(argv)
+    if args.with_human and args.calibrate_groovist:
+        p.error("--with-human goes with --stories, not --calibrate-groovist")
+    return _run(args, "eval", _eval)
 
 
 if __name__ == "__main__":  # pragma: no cover

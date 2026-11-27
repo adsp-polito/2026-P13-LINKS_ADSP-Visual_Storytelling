@@ -220,3 +220,97 @@ def test_phrase_file_name_is_a_run_side_file():
     from p13.eval import metrics
 
     assert gv.PHRASES_FILE in metrics.RUN_SIDE_FILES
+
+
+def _ref(story_dict, sid, story, images):
+    return StoryRecord.model_validate({**story_dict, "id": sid, "story": story, "images": images})
+
+
+def _calibration_setup(tmp_path, story_dict, monkeypatch, overrides=()):
+    imgs = {k: [f"{k}{n}.jpg" for n in range(3)] for k in "abc"}
+    refs = [
+        _ref(story_dict, "r1", "A dog.", imgs["a"]),
+        _ref(story_dict, "r2", "A cat.", imgs["b"]),
+        _ref(story_dict, "r3", "It ran.", imgs["c"]),
+    ]
+    write_jsonl(tmp_path / "processed" / "vist_val.jsonl", refs)
+    backend = FakeBackend(
+        chunks={"A dog.": [_tok("a dog")], "A cat.": [_tok("a cat")], "It ran.": []},
+        texts={"a dog": [1.0, 0.0], "a cat": [0.0, 1.0]},
+        regions={
+            **{p: [[1.0, 0.0]] for p in imgs["a"]},
+            **{p: [[0.0, 1.0]] for p in imgs["b"]},
+            **{p: [[0.6, 0.8]] for p in imgs["c"]},
+        },
+    )
+    monkeypatch.setattr(gv, "load_backend", lambda cfg: backend)
+    monkeypatch.setattr(gv, "load_lexicon", lambda path: {})
+    cfg = load_config(
+        "configs/e0_zeroshot.yaml",
+        [
+            f"data.jsonl_dir={tmp_path / 'processed'}",
+            f"output.dir={tmp_path / 'outputs'}",
+            "data.datasets=[vist]",
+            "data.subset=full",
+            *overrides,
+        ],
+    )
+    return cfg, refs
+
+
+def test_calibrate_sets_theta_to_mean_reference_alignment_and_checks_mismatch(
+    tmp_path, story_dict, monkeypatch
+):
+    cfg, _ = _calibration_setup(tmp_path, story_dict, monkeypatch)
+    report = json.loads(gv.calibrate(cfg).read_text(encoding="utf-8"))["vist"]
+    assert report["theta"] == pytest.approx(2.5)
+    assert (report["n_stories"], report["n_phrases"], report["n_compared"]) == (3, 2, 2)
+    assert report["own_mean_score"] == pytest.approx(math.tanh(2.5))
+    assert report["other_mean_score"] == pytest.approx((math.tanh(-2.5) + math.tanh(-0.5)) / 2)
+    assert report["own_wins_share"] == 1.0
+
+
+def test_calibrate_uses_the_dev_subset_ids(tmp_path, story_dict, monkeypatch):
+    (tmp_path / "splits").mkdir()
+    (tmp_path / "splits" / "vist_val_dev200.txt").write_text("r1\nr3\n", encoding="utf-8")
+    cfg, _ = _calibration_setup(
+        tmp_path,
+        story_dict,
+        monkeypatch,
+        ["data.subset=dev200", f"data.splits_dir={tmp_path / 'splits'}"],
+    )
+    report = json.loads(gv.calibrate(cfg).read_text(encoding="utf-8"))["vist"]
+    assert (report["n_stories"], report["n_phrases"]) == (2, 1)
+    assert report["theta"] == pytest.approx(2.5)
+
+
+def test_calibrate_refuses_test_split_and_missing_references(tmp_path, story_dict, monkeypatch):
+    cfg, _ = _calibration_setup(tmp_path, story_dict, monkeypatch, ["data.split=test"])
+    with pytest.raises(ValueError, match="never on the test split"):
+        gv.calibrate(cfg)
+    cfg, _ = _calibration_setup(tmp_path, story_dict, monkeypatch, ["data.datasets=[vwp]"])
+    with pytest.raises(FileNotFoundError, match=r"vwp_val\.jsonl"):
+        gv.calibrate(cfg)
+
+
+def test_mismatch_partner_shares_no_image(story_dict):
+    refs = [
+        _ref(story_dict, "r1", "x", ["p1", "p2", "p3"]),
+        _ref(story_dict, "r2", "x", ["p3", "p4", "p5"]),
+        _ref(story_dict, "r3", "x", ["p6", "p7", "p8"]),
+    ]
+    assert [gv._partner(refs, i).id for i in range(3)] == ["r3", "r3", "r1"]
+    assert gv._partner(refs[:2], 0) is None
+
+
+def test_cli_calibrate_flag(tmp_path, monkeypatch):
+    from p13 import cli
+
+    calls = []
+    monkeypatch.setattr(gv, "calibrate", lambda cfg: calls.append(cfg.data.split))
+    base = ["--config", "configs/e0_zeroshot.yaml", "--set", f"output.dir={tmp_path}"]
+    assert cli.eval_main([*base, "--calibrate-groovist"]) == 0
+    assert calls == ["val"]
+    for extra in (["--with-human"], ["--stories", "x.jsonl"], []):
+        with pytest.raises(SystemExit):
+            cli.eval_main([*base, "--calibrate-groovist", *extra] if extra else base)
