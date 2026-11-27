@@ -569,7 +569,7 @@ CORPUS_METRICS: dict[str, Callable[[list[GeneratedStory]], float]] = {
     "distinct_2": distinct_2,
 }
 
-RUN_SIDE_FILES: tuple[str, ...] = ("groovist_phrases.jsonl",)
+RUN_SIDE_FILES: tuple[str, ...] = ("groovist_phrases.jsonl", "groovist_settings.json")
 
 HUMAN_MODEL = "human"
 HUMAN_PROMPT_ID = "reference"

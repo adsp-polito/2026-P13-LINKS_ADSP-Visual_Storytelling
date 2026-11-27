@@ -120,6 +120,8 @@ def _eval(cfg: ExperimentConfig, args: argparse.Namespace) -> None:
         return
     from p13.eval.metrics import evaluate
 
+    if args.ignore_threshold_mismatch:
+        cfg.eval.ignore_threshold_mismatch = True
     evaluate(cfg, args.stories, with_human=args.with_human)
 
 
@@ -142,9 +144,15 @@ def eval_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help='also score the reference stories as the human baseline (model="human")',
     )
+    p.add_argument(
+        "--ignore-threshold-mismatch",
+        action="store_true",
+        help="quick local tests only: score GROOViST even if its settings differ from the "
+        "calibration (loud warning, recorded in groovist_settings.json)",
+    )
     args = p.parse_args(argv)
-    if args.with_human and args.calibrate_groovist:
-        p.error("--with-human goes with --stories, not --calibrate-groovist")
+    if args.calibrate_groovist and (args.with_human or args.ignore_threshold_mismatch):
+        p.error("--with-human and --ignore-threshold-mismatch go with --stories")
     return _run(args, "eval", _eval)
 
 

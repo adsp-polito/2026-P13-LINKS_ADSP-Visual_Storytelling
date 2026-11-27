@@ -9,13 +9,32 @@ import math
 import numpy as np
 import pytest
 
-from p13.common.config import ConfigError, load_config
+from p13.common.config import ConfigError, ExperimentConfig, load_config
 from p13.common.jsonl import write_jsonl
 from p13.common.schema import GeneratedStory, StoryRecord
 from p13.eval import groovist as gv
 from p13.eval.metrics import evaluate
 
 THETA = 0.6
+DEFAULT_EVAL = ExperimentConfig().eval
+
+
+def _entry(theta=THETA, **changes):
+    fields = {
+        "theta": theta,
+        "clip_model": DEFAULT_EVAL.clip_model,
+        "region_model": DEFAULT_EVAL.region_model,
+        "regions_per_image": DEFAULT_EVAL.regions_per_image,
+        "spacy_model": DEFAULT_EVAL.spacy_model,
+        "dtype": DEFAULT_EVAL.dtype,
+        "device": "cuda",
+        **changes,
+    }
+    return "{" + ", ".join(f"{k}: {v}" for k, v in fields.items()) + "}"
+
+
+def _thresholds(**entries):
+    return "{" + ", ".join(f"{d}: {e}" for d, e in entries.items()) + "}"
 
 
 def _tok(text, pos="NOUN"):
@@ -24,6 +43,8 @@ def _tok(text, pos="NOUN"):
 
 
 class FakeBackend:
+    device = "cpu"
+
     def __init__(self, chunks, texts, regions):
         self.chunks, self.texts, self.regions = chunks, texts, regions
         self.region_calls = []
@@ -150,7 +171,7 @@ def _setup(
     generated_dict,
     monkeypatch,
     stories,
-    threshold="{vist: 0.6}",
+    threshold=None,
     metric_names="groovist",
 ):
     write_jsonl(
@@ -176,7 +197,7 @@ def _setup(
             f"data.jsonl_dir={tmp_path / 'processed'}",
             f"output.dir={tmp_path / 'outputs'}",
             f"eval.metrics=[{metric_names}]",
-            f"eval.groovist_threshold={threshold}",
+            f"eval.groovist_threshold={threshold or _thresholds(vist=_entry())}",
         ],
     )
     return cfg, tmp_path / "gens.jsonl", backend
@@ -199,16 +220,32 @@ def test_groovist_needs_a_threshold_for_every_dataset(
     tmp_path, story_dict, generated_dict, monkeypatch
 ):
     cfg, gens, _ = _setup(
-        tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog."}, threshold="{vwp: 0.6}"
+        tmp_path,
+        story_dict,
+        generated_dict,
+        monkeypatch,
+        {"s1": "A dog."},
+        threshold=_thresholds(vwp=_entry()),
     )
     with pytest.raises(ValueError, match=r"groovist_threshold for \['vist'\]"):
         evaluate(cfg, [gens])
 
 
-def test_threshold_config_is_a_mapping_of_known_datasets():
-    cfg = load_config("configs/e0_zeroshot.yaml", ["eval.groovist_threshold={vist: 0.61, vwp: 1}"])
-    assert cfg.eval.groovist_threshold == {"vist": 0.61, "vwp": 1.0}
-    for bad in ["{coco: 0.6}", "0.6", "{vist: high}"]:
+def test_threshold_config_needs_theta_and_every_setting():
+    cfg = load_config(
+        "configs/e0_zeroshot.yaml", [f"eval.groovist_threshold={_thresholds(vist=_entry(0.61))}"]
+    )
+    entry = cfg.eval.groovist_threshold["vist"]
+    assert (entry.theta, entry.regions_per_image, entry.device) == (0.61, 10, "cuda")
+    no_dtype = _entry().replace(f", dtype: {DEFAULT_EVAL.dtype}", "")
+    for bad in [
+        "{vist: 0.61}",
+        "0.6",
+        _thresholds(coco=_entry()),
+        _thresholds(vist=_entry("high")),
+        _thresholds(vist=_entry(color="red")),
+        _thresholds(vist=no_dtype),
+    ]:
         with pytest.raises(ConfigError):
             load_config("configs/e0_zeroshot.yaml", [f"eval.groovist_threshold={bad}"])
 
@@ -251,6 +288,7 @@ def test_phrase_file_name_is_a_run_side_file():
     from p13.eval import metrics
 
     assert gv.PHRASES_FILE in metrics.RUN_SIDE_FILES
+    assert gv.SETTINGS_FILE in metrics.RUN_SIDE_FILES
 
 
 def _ref(story_dict, sid, story, images):
@@ -299,6 +337,18 @@ def test_calibrate_sets_theta_to_mean_reference_alignment_and_checks_mismatch(
     assert report["own_mean_score"] == pytest.approx(math.tanh(2.5))
     assert report["other_mean_score"] == pytest.approx((math.tanh(-2.5) + math.tanh(-0.5)) / 2)
     assert report["own_wins_share"] == 1.0
+    assert report["settings"] == {**gv.current_settings(cfg), "device": "cpu"}
+
+
+def test_calibration_line_pastes_back_into_the_config(tmp_path, story_dict, monkeypatch):
+    cfg, _ = _calibration_setup(tmp_path, story_dict, monkeypatch)
+    report = json.loads(gv.calibrate(cfg).read_text(encoding="utf-8"))
+    line = gv.threshold_line(report)
+    pasted = load_config("configs/e0_zeroshot.yaml", [f"eval.groovist_threshold={line}"])
+    entry = pasted.eval.groovist_threshold["vist"]
+    assert entry.theta == report["vist"]["theta"]
+    assert entry.device == "cpu"
+    assert gv.settings_mismatches(pasted, "vist") == []
 
 
 def test_calibrate_uses_the_dev_subset_ids(tmp_path, story_dict, monkeypatch):
@@ -366,3 +416,55 @@ def test_evaluate_writes_all_groovist_columns_from_one_model_pass(
     assert rows["s2"]["groovist_raw"] == rows["s2"]["groovist_grounded_share"] == ""
     assert backend.text_calls == 1
     assert len(_phrase_rows(cfg)) == 1
+
+
+def test_scoring_stops_when_settings_differ_from_calibration(
+    tmp_path, story_dict, generated_dict, monkeypatch
+):
+    cfg, gens, _ = _setup(tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog."})
+    cfg.eval.regions_per_image = 5
+    with pytest.raises(ValueError, match="regions_per_image: θ was calibrated with 10") as err:
+        evaluate(cfg, [gens])
+    assert "eval.regions_per_image=5" in str(err.value)
+    assert not (cfg.run_dir / "scores.csv").exists()
+
+
+def test_device_is_recorded_but_not_checked(tmp_path, story_dict, generated_dict, monkeypatch):
+    cfg, gens, _ = _setup(tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog."})
+    evaluate(cfg, [gens])
+    record = json.loads((cfg.run_dir / gv.SETTINGS_FILE).read_text(encoding="utf-8"))["vist"]
+    assert record["calibrated"]["device"] == "cuda"
+    assert record["used"]["device"] == "cpu"
+    assert record["mismatches"] == [] and record["ignored_mismatch"] is False
+
+
+def test_ignore_flag_warns_and_records_the_override(
+    tmp_path, story_dict, generated_dict, monkeypatch, capsys
+):
+    from p13 import cli
+
+    cfg, gens, _ = _setup(tmp_path, story_dict, generated_dict, monkeypatch, {"s1": "A dog."})
+    args = [
+        "--config",
+        "configs/e0_zeroshot.yaml",
+        "--stories",
+        str(gens),
+        "--set",
+        f"data.jsonl_dir={tmp_path / 'processed'}",
+        "--set",
+        f"output.dir={tmp_path / 'outputs'}",
+        "--set",
+        "eval.metrics=[groovist]",
+        "--set",
+        f"eval.groovist_threshold={_thresholds(vist=_entry())}",
+        "--set",
+        "eval.regions_per_image=5",
+    ]
+    with pytest.raises(ValueError, match="regions_per_image"):
+        cli.eval_main(args)
+    assert cli.eval_main([*args, "--ignore-threshold-mismatch"]) == 0
+    assert "IGNORING GROOViST THRESHOLD MISMATCH" in capsys.readouterr().err
+    record = json.loads((cfg.run_dir / gv.SETTINGS_FILE).read_text(encoding="utf-8"))["vist"]
+    assert record["ignored_mismatch"] is True
+    assert record["used"]["regions_per_image"] == 5
+    assert record["mismatches"] and "regions_per_image" in record["mismatches"][0]

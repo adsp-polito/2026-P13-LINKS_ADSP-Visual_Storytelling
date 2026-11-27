@@ -27,6 +27,7 @@ for error analysis.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import functools
 import json
 import logging
@@ -66,6 +67,8 @@ class Phrase:
 
 
 class Backend(Protocol):
+    device: str
+
     def noun_chunks(self, text: str) -> list[list[Token]]: ...
 
     def embed_texts(self, texts: list[str]) -> np.ndarray: ...
@@ -189,18 +192,22 @@ def score(
 def _score_group(
     gens: list[GeneratedStory], refs: dict[Any, StoryRecord], cfg: ExperimentConfig
 ) -> dict[str, dict[Any, float]]:
-    missing = sorted({g.dataset for g in gens} - set(cfg.eval.groovist_threshold))
+    datasets = sorted({g.dataset for g in gens})
+    missing = [d for d in datasets if d not in cfg.eval.groovist_threshold]
     if missing:
         raise ValueError(
-            f"groovist needs eval.groovist_threshold for {missing}: calibrate it on the "
-            "reference stories of that dataset first"
+            f"groovist needs eval.groovist_threshold for {missing}: run "
+            "p13-eval --calibrate-groovist and paste the line it prints into the config"
         )
+    mismatches = {d: settings_mismatches(cfg, d) for d in datasets}
+    check_mismatches(mismatches, cfg.eval.ignore_threshold_mismatch)
     backend = load_backend(cfg)
     lexicon = load_lexicon(cfg.eval.concreteness_file)
+    record_settings(cfg, mismatches, backend.device)
     out: dict[str, dict[Any, float]] = {name: {} for name in COLUMNS}
     rows: list[dict[str, Any]] = []
     for g in gens:
-        theta = cfg.eval.groovist_threshold[g.dataset]
+        theta = cfg.eval.groovist_threshold[g.dataset].theta
         phrases = story_phrases(g.story, refs[g.key].images, backend, lexicon)
         for name, fn in COLUMNS.items():
             value = fn(phrases, theta)
@@ -209,6 +216,62 @@ def _score_group(
         rows.extend(phrase_rows(g, phrases, theta))
     append_phrase_rows(cfg.run_dir / PHRASES_FILE, rows)
     return out
+
+
+CHECKED_SETTINGS = ("clip_model", "region_model", "regions_per_image", "spacy_model", "dtype")
+SETTINGS_FILE = "groovist_settings.json"
+
+
+def current_settings(cfg: ExperimentConfig) -> dict[str, Any]:
+    return {name: getattr(cfg.eval, name) for name in CHECKED_SETTINGS}
+
+
+def settings_mismatches(cfg: ExperimentConfig, dataset: str) -> list[str]:
+    """Settings that differ between θ's calibration and this run (the device isn't checked)."""
+    calibrated = cfg.eval.groovist_threshold[dataset]
+    return [
+        f"{name}: θ was calibrated with {getattr(calibrated, name)!r}, "
+        f"this run has eval.{name}={value!r}"
+        for name, value in current_settings(cfg).items()
+        if getattr(calibrated, name) != value
+    ]
+
+
+def check_mismatches(mismatches: dict[str, list[str]], ignore: bool) -> None:
+    found = {d: m for d, m in mismatches.items() if m}
+    if not found:
+        return
+    lines = [f"{d} {m}" for d, ms in found.items() for m in ms]
+    if not ignore:
+        raise ValueError(
+            "groovist settings differ from the ones θ was calibrated with:\n  "
+            + "\n  ".join(lines)
+            + "\nrecalibrate with p13-eval --calibrate-groovist, or pass "
+            "--ignore-threshold-mismatch for a quick local test"
+        )
+    banner = "!" * 72
+    log.warning(
+        "%s\nIGNORING GROOViST THRESHOLD MISMATCH (--ignore-threshold-mismatch): these scores "
+        "are not comparable with properly calibrated runs\n  %s\n%s",
+        banner,
+        "\n  ".join(lines),
+        banner,
+    )
+
+
+def record_settings(cfg: ExperimentConfig, mismatches: dict[str, list[str]], device: str) -> None:
+    """Add this group's datasets to ``<run_dir>/groovist_settings.json`` (cleared every run)."""
+    path = cfg.run_dir / SETTINGS_FILE
+    record = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    for dataset, found in mismatches.items():
+        record[dataset] = {
+            "calibrated": dataclasses.asdict(cfg.eval.groovist_threshold[dataset]),
+            "used": {**current_settings(cfg), "device": device},
+            "mismatches": found,
+            "ignored_mismatch": bool(found) and cfg.eval.ignore_threshold_mismatch,
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
 def phrase_rows(g: GeneratedStory, phrases: list[Phrase], theta: float) -> list[dict[str, Any]]:
@@ -254,8 +317,12 @@ def calibrate(cfg: ExperimentConfig) -> Path:
         raise ValueError("calibrate GROOViST on val, never on the test split")
     backend = load_backend(cfg)
     lexicon = load_lexicon(cfg.eval.concreteness_file)
+    settings = {**current_settings(cfg), "device": backend.device}
     report = {
-        dataset: calibrate_dataset(eval_references(cfg, dataset), backend, lexicon)
+        dataset: {
+            **calibrate_dataset(eval_references(cfg, dataset), backend, lexicon),
+            "settings": settings,
+        }
         for dataset in cfg.data.datasets
     }
     out = cfg.run_dir / CALIBRATION_FILE
@@ -274,10 +341,18 @@ def calibrate(cfg: ExperimentConfig) -> Path:
             100 * r["own_wins_share"],
             r["n_compared"],
         )
-    thresholds = ", ".join(f"{d}: {r['theta']:.4f}" for d, r in report.items())
-    log.info("put in the config: eval.groovist_threshold: {%s}", thresholds)
+    log.info("put in the config: eval.groovist_threshold: %s", threshold_line(report))
     log.info("wrote %s", out)
     return out
+
+
+def threshold_line(report: dict[str, dict[str, Any]]) -> str:
+    """The ``eval.groovist_threshold`` value as one YAML flow mapping, ready to paste."""
+    entries = []
+    for dataset, r in report.items():
+        fields = {"theta": r["theta"], **r["settings"]}
+        entries.append(f"{dataset}: {{" + ", ".join(f"{k}: {v}" for k, v in fields.items()) + "}")
+    return "{" + ", ".join(entries) + "}"
 
 
 def calibrate_dataset(
@@ -396,7 +471,12 @@ def load_lexicon(path: str) -> dict[str, float]:
 def load_backend(cfg: ExperimentConfig) -> Backend:
     e = cfg.eval
     return _load_backend(
-        e.spacy_model, e.clip_model, e.region_model, e.regions_per_image, resolve_device(e.device)
+        e.spacy_model,
+        e.clip_model,
+        e.region_model,
+        e.regions_per_image,
+        resolve_device(e.device),
+        e.dtype,
     )
 
 
@@ -414,9 +494,14 @@ def resolve_device(name: str) -> str:
 
 @functools.lru_cache(maxsize=1)
 def _load_backend(
-    spacy_model: str, clip_model: str, region_model: str, regions_per_image: int, device: str
+    spacy_model: str,
+    clip_model: str,
+    region_model: str,
+    regions_per_image: int,
+    device: str,
+    dtype: str,
 ) -> Backend:
-    return _ModelBackend(spacy_model, clip_model, region_model, regions_per_image, device)
+    return _ModelBackend(spacy_model, clip_model, region_model, regions_per_image, device, dtype)
 
 
 class _ModelBackend:
@@ -427,6 +512,7 @@ class _ModelBackend:
         region_model: str,
         regions_per_image: int,
         device: str,
+        dtype: str,
     ) -> None:
         import spacy
         import torch
@@ -438,15 +524,26 @@ class _ModelBackend:
         )
 
         log.info(
-            "groovist: loading %s, %s, %s on %s", spacy_model, clip_model, region_model, device
+            "groovist: loading %s, %s, %s on %s in %s",
+            spacy_model,
+            clip_model,
+            region_model,
+            device,
+            dtype,
         )
         self._torch = torch
+        self.device = device
         self._device = device
+        self._dtype = getattr(torch, dtype)
         self._k = regions_per_image
         self._nlp = spacy.load(spacy_model)
-        self._clip = CLIPModel.from_pretrained(clip_model).to(device).eval()
+        self._clip = CLIPModel.from_pretrained(clip_model, dtype=self._dtype).to(device).eval()
         self._clip_proc = CLIPProcessor.from_pretrained(clip_model)
-        self._owl = Owlv2ForObjectDetection.from_pretrained(region_model).to(device).eval()
+        self._owl = (
+            Owlv2ForObjectDetection.from_pretrained(region_model, dtype=self._dtype)
+            .to(device)
+            .eval()
+        )
         self._owl_proc = Owlv2Processor.from_pretrained(region_model)
         self._regions: dict[str, np.ndarray] = {}
 
@@ -476,7 +573,7 @@ class _ModelBackend:
             inputs = self._clip_proc(images=crops, return_tensors="pt")
             with self._torch.no_grad():
                 pooled = self._clip.vision_model(
-                    pixel_values=inputs["pixel_values"].to(self._device)
+                    pixel_values=inputs["pixel_values"].to(self._device, self._dtype)
                 ).pooler_output
                 embs = self._clip.visual_projection(pooled).float().cpu().numpy()
             self._regions[image_path] = embs
@@ -487,7 +584,14 @@ class _ModelBackend:
             return []
         inputs = self._owl_proc(text=[["an object"]], images=image, return_tensors="pt")
         with self._torch.no_grad():
-            out = self._owl(**{k: v.to(self._device) for k, v in inputs.items()})
+            out = self._owl(
+                **{
+                    k: v.to(self._device, self._dtype)
+                    if v.is_floating_point()
+                    else v.to(self._device)
+                    for k, v in inputs.items()
+                }
+            )
         objectness = out.objectness_logits[0].reshape(-1).float().cpu().numpy()
         boxes = out.pred_boxes[0].float().cpu().numpy()
         return select_boxes(boxes, objectness, image.width, image.height, self._k)

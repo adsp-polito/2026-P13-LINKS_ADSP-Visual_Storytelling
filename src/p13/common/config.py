@@ -104,6 +104,17 @@ class TrainSection:
 
 
 @dataclass
+class GroovistThreshold:
+    theta: float
+    clip_model: str
+    region_model: str
+    regions_per_image: int
+    spacy_model: str
+    dtype: str
+    device: str
+
+
+@dataclass
 class EvalSection:
     metrics: list[str] = field(
         default_factory=lambda: [
@@ -146,8 +157,10 @@ class EvalSection:
     clip_model: str = "openai/clip-vit-base-patch32"
     region_model: str = "google/owlv2-base-patch16-ensemble"
     regions_per_image: int = 10
+    dtype: Literal["float32", "float16", "bfloat16"] = "float32"
     concreteness_file: str = "data/raw/concreteness/brysbaert2014.tsv"
-    groovist_threshold: dict[str, float] = field(default_factory=dict)
+    groovist_threshold: dict[str, GroovistThreshold] = field(default_factory=dict)
+    ignore_threshold_mismatch: bool = False
 
 
 @dataclass
@@ -243,6 +256,14 @@ def _build(cls: type, data: Any, where: str) -> Any:
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)} in {cls.__name__}")
+    required = [
+        f.name
+        for f in dataclasses.fields(cls)
+        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+    ]
+    absent = [name for name in required if name not in data]
+    if absent:
+        raise ConfigError(f"{where}: missing key(s) {absent} in {cls.__name__}")
     kwargs = {}
     for name, value in data.items():
         tp = hints[name]
@@ -268,7 +289,14 @@ def _coerce(tp: Any, value: Any, where: str) -> Any:
     if origin is dict:
         if not isinstance(value, dict):
             raise ConfigError(f"{where}: expected a mapping, got {value!r}")
-        return {_coerce(args[0], k, where): _coerce(args[1], v, where) for k, v in value.items()}
+        return {
+            _coerce(args[0], k, where): (
+                _build(args[1], v, f"{where}.{k}")
+                if dataclasses.is_dataclass(args[1])
+                else _coerce(args[1], v, where)
+            )
+            for k, v in value.items()
+        }
     if origin is list:
         if not isinstance(value, list):
             raise ConfigError(f"{where}: expected a list, got {value!r}")
