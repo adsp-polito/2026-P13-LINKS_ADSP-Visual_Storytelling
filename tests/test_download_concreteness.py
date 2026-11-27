@@ -42,3 +42,17 @@ def test_download_concreteness_reads_the_official_sheet_layout():
     assert [(r["Word"], float(r["Conc.M"])) for r in rows] == [("dog", 4.85), ("infinity", 1.36)]
     with pytest.raises(ValueError, match="expected 39954 words"):
         dl.convert(_xlsx([["Word", "Bigram", "Conc.M"], ["dog", 0, 4.85]]))
+
+
+def test_download_concreteness_checks_the_official_file_hash():
+    import hashlib
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("dl", "data/download_concreteness.py")
+    dl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dl)
+    with pytest.raises(ValueError, match="Springer changed the file"):
+        dl.check_sha256(b"not the official file")
+    data = b"pretend official"
+    dl.EXPECTED_SHA256 = hashlib.sha256(data).hexdigest()
+    dl.check_sha256(data)

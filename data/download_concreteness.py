@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import re
 import sys
@@ -26,6 +27,16 @@ URL = (
 DEFAULT_OUT = Path("data/raw/concreteness/brysbaert2014.tsv")
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 EXPECTED_WORDS = 39954
+EXPECTED_SHA256 = "1673ead761e28833a40e82c0d20f10782955ced9366d600eafeefee0f2254545"
+
+
+def check_sha256(data: bytes) -> None:
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != EXPECTED_SHA256:
+        raise ValueError(
+            f"the downloaded file has SHA-256 {digest}, expected {EXPECTED_SHA256}: "
+            "Springer changed the file, check it before updating EXPECTED_SHA256"
+        )
 
 
 def read_rows(xlsx: bytes) -> list[dict[str, str]]:
@@ -71,7 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = p.parse_args(argv)
     with urllib.request.urlopen(URL, timeout=60) as response:
-        ratings = convert(response.read())
+        data = response.read()
+    check_sha256(data)
+    ratings = convert(data)
     write_tsv(ratings, args.out)
     print(f"wrote {len(ratings)} ratings to {args.out}")
     return 0
