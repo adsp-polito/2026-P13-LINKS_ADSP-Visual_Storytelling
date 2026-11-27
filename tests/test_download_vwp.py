@@ -83,3 +83,22 @@ def test_download_image_reports_ok(tmp_path, monkeypatch):
 
     assert download_vwp._download_image(("a", "https://example.org/a.jpg", dst)) == "ok"
     assert dst.is_file()
+
+
+@pytest.mark.parametrize(
+    ("split", "expected"),
+    [("train", ["vwp_v2.1_train.csv", "vwp_v2.1_val.csv"]), ("val", ["vwp_v2.1_val.csv"])],
+)
+def test_main_also_downloads_the_val_csv_for_train(tmp_path, monkeypatch, split, expected):
+    fetched = []
+
+    def fake_fetch(url, dst):
+        fetched.append(dst.name)
+        dst.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(download_vwp, "fetch", fake_fetch)
+    monkeypatch.setattr(download_vwp, "read_csv", lambda path: [])
+    monkeypatch.setattr(download_vwp, "image_urls", lambda stories: {})
+
+    assert download_vwp.main(["--split", split, "--raw-dir", str(tmp_path)]) == 0
+    assert fetched == expected

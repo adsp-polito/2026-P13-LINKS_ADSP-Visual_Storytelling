@@ -4,6 +4,9 @@ Run from the repo root with the venv active::
 
     python data/download_vwp.py --split val
 
+``--split train`` also downloads the val CSV (not the val images): ``p13-prepare`` needs it
+to drop train stories that share a shot with val.
+
 Safe to stop and run again: a valid image that is already on disk is skipped, and
 every file is written to a temp name first, so a crash never leaves a half file.
 VWP images are movie frames: academic use only, never commit them (data/README.md).
@@ -81,11 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=8, help="parallel downloads")
     args = p.parse_args(argv)
 
+    for split in [args.split, "val"] if args.split == "train" else [args.split]:
+        path = args.raw_dir / csv_name(split)
+        if not path.is_file():
+            print(f"downloading {path.name} ...")
+            args.raw_dir.mkdir(parents=True, exist_ok=True)
+            fetch(HF_URL.format(name=path.name), path)
+
     csv_path = args.raw_dir / csv_name(args.split)
-    if not csv_path.is_file():
-        print(f"downloading {csv_path.name} ...")
-        args.raw_dir.mkdir(parents=True, exist_ok=True)
-        fetch(HF_URL.format(name=csv_path.name), csv_path)
 
     urls = image_urls(read_csv(csv_path))
     image_dir = args.raw_dir / "images" / args.split

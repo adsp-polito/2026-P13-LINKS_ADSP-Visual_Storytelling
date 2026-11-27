@@ -33,7 +33,7 @@ from p13.common.jsonl import read_jsonl, write_jsonl
 from p13.common.prompts import get_prompt
 from p13.common.schema import GeneratedStory, StoryRecord
 from p13.common.seed import set_seed
-from p13.common.subset import read_ids, subset_path
+from p13.common.subset import load_subset_records
 from p13.infer.model_loading import load_model
 
 log = logging.getLogger(__name__)
@@ -45,32 +45,10 @@ _THINK_TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
 def load_split_records(cfg: ExperimentConfig, dataset: str) -> list[StoryRecord]:
     """Load validated :class:`StoryRecord` items for ``dataset`` and ``cfg.data.split``.
 
-    When ``cfg.data.subset == "dev200"``, filters to the committed dev-subset ID list in
-    exact list order and raises if any listed ID is absent from the JSONL file.
+    ``data.subset`` is ``full`` or a tag such as ``dev200`` / ``1010``; the selection is
+    done by :func:`p13.common.subset.load_subset_records`, which evaluation uses too.
     """
-    split = cfg.data.split
-    jsonl_path = Path(cfg.data.jsonl_dir) / f"{dataset}_{split}.jsonl"
-    if not jsonl_path.is_file():
-        raise FileNotFoundError(
-            f"{jsonl_path} not found; run p13-prepare or unpack the processed JSONL first"
-        )
-    records = read_jsonl(jsonl_path, StoryRecord)
-    if cfg.data.subset != "dev200":
-        return records
-
-    sub_path = subset_path(cfg.data.splits_dir, dataset, split, cfg.data.dev_subset_size)
-    if not sub_path.is_file():
-        raise FileNotFoundError(
-            f"{sub_path} not found; run p13-prepare first or use --set data.subset=full"
-        )
-    want_ids = read_ids(sub_path)
-    by_id = {r.id: r for r in records}
-    missing = [i for i in want_ids if i not in by_id]
-    if missing:
-        raise RuntimeError(
-            f"{sub_path} lists {len(missing)} id(s) missing from {jsonl_path} (e.g. {missing[0]})"
-        )
-    return [by_id[i] for i in want_ids]
+    return load_subset_records(cfg, dataset)
 
 
 def build_messages(image_paths: Sequence[str | Path], prompt_text: str) -> list[dict[str, Any]]:

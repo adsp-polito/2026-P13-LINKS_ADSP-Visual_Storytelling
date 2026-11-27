@@ -15,13 +15,17 @@ Pipeline for :func:`prepare`:
    placeholder for that name if the same story shows it, else "a person") and numbered
    placeholders rewritten (:func:`rewrite_placeholders`), then PTB tokenisation undone
    (``text.detokenize``: "does n't" -> "doesn't", "home ." -> "home.").
-3. Drop a whole story if its links do not match ``img_id_list`` and the text segments
-   (same count, no gaps),
+3. Drop a whole story if (train only) it uses a shot that is also in val: same movie and
+   shot number, read from the val CSV (:func:`shots_of`), so training never sees a frame
+   of the val/test stories; if its links do not match ``img_id_list`` and the text
+   segments (same count, no gaps),
    if it repeats an earlier story, if it has a bad number of images, no text, or any
    image that is missing or cannot be decoded (``drop_counts`` says why).
 4. Resize images to long side ≤ ``cfg.data.max_image_side`` into ``data/images/vwp/<split>/``.
-5. Write ``data/processed/vwp_<split>.jsonl`` and, for val, the dev-200 id list with
-   at most one story per scene.
+5. Write ``data/processed/vwp_<split>.jsonl``, ``vwp_<split>_groups.tsv`` (id -> scene,
+   for the cluster bootstrap in eval) and the committed id lists: for train the dev list
+   (``vwp_train_dev200``, at most one story per scene), for val the test list
+   (``vwp_val_791``, one story per image sequence). See :func:`_write_id_lists`.
 
 The test split is blind (the CSV has images but no stories), so :func:`prepare` refuses it.
 """
@@ -32,7 +36,6 @@ import ast
 import csv
 import difflib
 import logging
-import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -41,7 +44,14 @@ from pathlib import Path
 from p13.common.config import ExperimentConfig
 from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
-from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
+from p13.common.subset import (
+    groups_path,
+    sample_ids,
+    subset_file,
+    subset_path,
+    write_groups,
+)
+from p13.data.id_lists import ensure_id_list, one_per_group
 from p13.data.images import find_image, is_valid_image, resize_long_side
 from p13.data.text import detokenize
 
@@ -108,6 +118,7 @@ _N_LINKS, _N_CHARS = 10, 5
 
 # Why a whole story can be dropped (keys of the ``drop_counts`` dict).
 DROP_REASONS = (
+    "val_overlap",  # first, so every train story that shares a shot with val is counted here
     "link_count_mismatch",
     "duplicate",
     "bad_length",
@@ -277,6 +288,13 @@ def image_key(url: str) -> str:
     return "_".join(m.groups())
 
 
+# (movie id, shot number), e.g. ("tt0047396", "0667"). VWP cuts a movie into scenes in more
+# than one way, so one shot can sit in a train scene and a val scene under two folder names.
+Shot = tuple[str, str]
+_KEY_SHOT_RE = re.compile(r"^(tt\d+)_.*_shot_(\d+)_img_\d+$")  # from image_key
+_LISTED_SHOT_RE = re.compile(r"^(tt\d+)_(\d+)_\d+$")  # img_id_list entry "tt0047396_0667_0"
+
+
 @dataclass(frozen=True)
 class RawStory:
     story_id: str
@@ -287,6 +305,7 @@ class RawStory:
     n_texts: int  # non-empty text0..9 segments (one per shot)
     text: str  # final story text (see story_text)
     aligned: bool = True  # links and texts both fill slots 0..n-1 with no gap
+    listed_shots: frozenset[Shot] = frozenset()  # (movie, shot) of each img_id_list entry
 
 
 def read_csv(path: Path) -> list[RawStory]:
@@ -306,20 +325,36 @@ def read_csv(path: Path) -> list[RawStory]:
             text_slots = [i for i in range(_N_LINKS) if row[f"text{i}"].strip()]
             urls = tuple(row[f"link{i}"].strip() for i in link_slots)
             names = [c for i in range(_N_CHARS) if (c := row[f"char{i}"].strip()) not in _EMPTY]
+            listed = [str(x) for x in ast.literal_eval(row["img_id_list"])]
             stories.append(
                 RawStory(
                     story_id=story_id,
                     scene_id=row["scene_full_id"].strip(),
                     image_keys=tuple(image_key(u) for u in urls),
                     urls=urls,
-                    n_listed=len(ast.literal_eval(row["img_id_list"])),
+                    n_listed=len(listed),
                     n_texts=len(text_slots),
                     text=story_text(row["anonymised_story"], names, row["story"]),
                     aligned=link_slots == list(range(len(link_slots)))
                     and text_slots == list(range(len(text_slots))),
+                    listed_shots=frozenset(
+                        m.groups() for x in listed if (m := _LISTED_SHOT_RE.match(x))
+                    ),
                 )
             )
     return stories
+
+
+def shots_of(story: RawStory) -> set[Shot]:
+    """Every (movie, shot) of ``story``, from its image keys and from ``img_id_list``.
+
+    The image number is ignored on purpose: two frames of one shot look almost the same.
+    """
+    shots = set(story.listed_shots)
+    for key in story.image_keys:
+        if m := _KEY_SHOT_RE.match(key):
+            shots.add((m.group(1), m.group(2)))
+    return shots
 
 
 def image_urls(stories: list[RawStory]) -> dict[str, str]:
@@ -339,11 +374,13 @@ def build_records(
     raw_image_dir: Path,
     out_image_dir: Path,
     max_image_side: int,
+    exclude_shots: set[Shot] | frozenset[Shot] = frozenset(),
 ) -> tuple[list[StoryRecord], dict[str, int]]:
     """Steps 3–4: return ``(records, drop_counts)``; log how many stories were dropped and why.
 
     Checks run in ``DROP_REASONS`` order, so a story is counted under its first problem.
-    For duplicates (same images and same text), the first story in the file is kept.
+    A story that uses any shot in ``exclude_shots`` (the val shots, for train) is dropped as
+    ``val_overlap``. For duplicates (same images and same text), the first story is kept.
     If a story has both missing and broken images, it counts as ``missing_image``.
     Images are only resized for stories that are kept.
     """
@@ -364,6 +401,9 @@ def build_records(
 
     records: list[StoryRecord] = []
     for story in stories:
+        if exclude_shots and not exclude_shots.isdisjoint(shots_of(story)):
+            drops["val_overlap"] += 1
+            continue
         n = len(story.image_keys)
         if not story.aligned or n != story.n_listed or n != story.n_texts:
             drops["link_count_mismatch"] += 1
@@ -401,55 +441,34 @@ def build_records(
     return records, drops
 
 
-def _one_per_scene(ids: set[str], scene_of: dict[str, str], seed: int) -> list[str]:
-    """One random kept story per scene (scenes and ids sorted first, so it is deterministic)."""
-    by_scene: dict[str, list[str]] = defaultdict(list)
-    for i in sorted(ids):
-        by_scene[scene_of[i]].append(i)
-    rng = random.Random(seed)
-    return [rng.choice(by_scene[scene]) for scene in sorted(by_scene)]
-
-
-def _ensure_dev_ids(
+def _write_id_lists(
     cfg: ExperimentConfig,
     split: str,
     records: list[StoryRecord],
     drops: dict[str, int],
     scene_of: dict[str, str],
 ) -> None:
-    """Write the committed dev-subset id list once; never overwrite an existing one.
+    """Committed id lists (seed ``cfg.experiment.seed``).
 
-    The list holds at most one story per scene, so no scene is evaluated twice.
-    Raises if an existing list names stories that were not built here, because eval
-    would then silently run on fewer stories than the committed subset.
+    * train: ``vwp_train_dev<N>``, N = ``data.dev_subset_size`` stories, at most one per
+      scene, for prompt tuning (VWP val is our test set, so dev comes from train).
+    * val: ``vwp_val_<n>``, one story per image sequence (n = 791 on VWP v2.1): the final
+      test list. Several writers often told a story about the same shots; one is enough.
     """
-    size = cfg.data.dev_subset_size
-    path = subset_path(cfg.data.splits_dir, "vwp", split, size)
-    ids = {r.id for r in records}
-    if path.exists():
-        absent = [i for i in read_ids(path) if i not in ids]
-        if absent:
-            raise RuntimeError(
-                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
-                f"check the {split} images (drop counts: {drops})"
-            )
-        return
-    if not ids:
-        log.warning("not writing %s: no stories were built", path)
-        return
-    if drops["missing_image"]:
-        log.warning(
-            "not writing %s: %d stories lack images. Download all %s images first.",
-            path,
-            drops["missing_image"],
-            split,
-        )
-        return
-    picked = _one_per_scene(ids, scene_of, cfg.experiment.seed)
-    if len(picked) < size:
-        log.warning("%s: only %d scenes, so the list has %d ids", path, len(picked), len(picked))
-    write_ids(path, sample_ids(picked, size, cfg.experiment.seed))
-    log.info("wrote %s", path)
+    seed = cfg.experiment.seed
+    built = {r.id for r in records}
+    if split == "train":
+        size = cfg.data.dev_subset_size
+        per_scene = one_per_group(built, scene_of, seed)
+        if len(per_scene) < size:
+            log.warning("VWP train: only %d scenes, so the dev list is smaller", len(per_scene))
+        path = subset_path(cfg.data.splits_dir, "vwp", "train", size)
+        ensure_id_list(path, sample_ids(per_scene, size, seed), built, drops)
+    else:
+        sequence_of = {r.id: "\n".join(r.images) for r in records}
+        ids = sorted(one_per_group(built, sequence_of, seed), key=lambda i: (len(i), i))
+        path = subset_file(cfg.data.splits_dir, "vwp", "val", str(len(ids)))
+        ensure_id_list(path, ids, built, drops)
 
 
 def prepare(cfg: ExperimentConfig, split: str) -> Path:
@@ -472,6 +491,15 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
         raise FileNotFoundError(
             f"{raw_image_dir} not found; run: python data/download_vwp.py --split {split}"
         )
+    exclude_shots: set[Shot] = set()
+    if split == "train":
+        val_csv = raw_dir / csv_name("val")
+        if not val_csv.is_file():
+            raise FileNotFoundError(
+                f"{val_csv} not found: train drops every story that shares a shot with val; "
+                "run: python data/download_vwp.py --split train"
+            )
+        exclude_shots = set().union(*(shots_of(s) for s in read_csv(val_csv)))
     stories = read_csv(csv_path)
     records, drops = build_records(
         stories,
@@ -479,6 +507,7 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
         raw_image_dir=raw_image_dir,
         out_image_dir=Path(cfg.data.image_dir) / "vwp" / split,
         max_image_side=cfg.data.max_image_side,
+        exclude_shots=exclude_shots,
     )
     out_path = Path(cfg.data.jsonl_dir) / f"vwp_{split}.jsonl"
     if not records:
@@ -489,6 +518,9 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
     n = write_jsonl(out_path, records)
     log.info("VWP %s: wrote %d records to %s", split, n, out_path)
 
-    if split == "val":
-        _ensure_dev_ids(cfg, split, records, drops, {s.story_id: s.scene_id for s in stories})
+    scene_of = {s.story_id: s.scene_id for s in stories}
+    write_groups(
+        groups_path(cfg.data.jsonl_dir, "vwp", split), {r.id: scene_of[r.id] for r in records}
+    )
+    _write_id_lists(cfg, split, records, drops, scene_of)
     return out_path

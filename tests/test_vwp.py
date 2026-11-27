@@ -1,6 +1,7 @@
 """Tests for the VWP loader. Tiny fake CSVs and images only (CI has no datasets)."""
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from PIL import Image
 from p13.common.config import parse_config_dict
 from p13.common.jsonl import read_jsonl
 from p13.common.schema import StoryRecord
-from p13.common.subset import read_ids
+from p13.common.subset import read_groups, read_ids
 from p13.data.vwp import (
     DROP_REASONS,
     RawStory,
@@ -21,6 +22,7 @@ from p13.data.vwp import (
     prepare,
     read_csv,
     rewrite_placeholders,
+    shots_of,
     story_text,
 )
 
@@ -280,6 +282,22 @@ def test_read_csv_rejects_duplicate_story_ids(tmp_path):
         read_csv(_write_csv(tmp_path / "v.csv", rows))
 
 
+def test_read_csv_reads_shots_from_img_id_list(tmp_path):
+    row = _row("1", "sc", [1, 2, 3])
+    row["img_id_list"] = str(["tt0047396_0667_0", "tt0047396_0668_1", "not_a_shot"])
+    (story,) = read_csv(_write_csv(tmp_path / "v.csv", [row]))
+    assert story.listed_shots == {("tt0047396", "0667"), ("tt0047396", "0668")}
+    assert story.n_listed == 3
+
+
+def test_shots_of_ignores_the_scene_folder_and_adds_listed_shots():
+    a = _story("a", [1, 2])
+    # The same shot 2 in another scene folder ("_5"), plus one shot only in img_id_list.
+    b = replace(a, image_keys=(_sid(2, "_5"),), listed_shots=frozenset({("tt9", "0007")}))
+    assert shots_of(a) == {("tt0000001", "0001"), ("tt0000001", "0002")}
+    assert shots_of(b) == {("tt0000001", "0002"), ("tt9", "0007")}
+
+
 def test_image_urls_maps_each_shot_once(tmp_path):
     rows = [_row("1", "sc", [1, 2, 3]), _row("2", "sc", [2, 3, 4])]
     urls = image_urls(read_csv(_write_csv(tmp_path / "v.csv", rows)))
@@ -352,6 +370,7 @@ def test_build_records_drop_reasons(tmp_path):
 
     assert [r.id for r in records] == ["ok"]
     assert drops == {
+        "val_overlap": 0,
         "link_count_mismatch": 2,
         "duplicate": 1,
         "bad_length": 1,
@@ -392,6 +411,29 @@ def test_build_records_drops_a_story_with_a_link_gap(tmp_path):
     assert records == [] and drops["link_count_mismatch"] == 1
 
 
+def test_build_records_drops_val_overlap_first(tmp_path):
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    for n in range(1, 7):
+        _make_image(raw, _sid(n))
+    stories = [
+        _story("keep", [1, 2, 3]),
+        _story("shares_shot_4", [4, 5, 6]),
+        _story("gap_and_shares_shot_4", [4, 5, 6], "a woman sat .", aligned=False),
+    ]
+
+    records, drops = build_records(
+        stories,
+        split="train",
+        raw_image_dir=raw,
+        out_image_dir=out,
+        max_image_side=448,
+        exclude_shots={("tt0000001", "0004")},
+    )
+
+    assert [r.id for r in records] == ["keep"]
+    assert drops == _NO_DROPS | {"val_overlap": 2}  # counted before the link gap
+
+
 # ---------------------------------------------------------------- prepare
 
 # story id -> (scene, shots); scenes A and B have two stories each.
@@ -403,14 +445,20 @@ _STORIES = {
 }
 
 
-def _write_split(root: Path, split: str) -> None:
+def _write_split(root: Path, split: str, extra: tuple[dict[str, str], ...] = ()) -> None:
+    """The _STORIES rows (plus ``extra`` rows, whose shots must be among 1-8) and images."""
     vwp = root / "raw" / "vwp"
     rows = []
     for story_id, (scene, shots) in _STORIES.items():
         rows.append(_row(story_id, scene, shots))
         for n in shots:
             _make_image(vwp / "images" / split, _sid(n))
-    _write_csv(vwp / f"vwp_v2.1_{split}.csv", rows)
+    _write_csv(vwp / f"vwp_v2.1_{split}.csv", rows + list(extra))
+
+
+def _write_val_csv(root: Path, shots: list[int]) -> None:
+    """Only the val CSV (no images): what prepare("train") reads to find the val shots."""
+    _write_csv(root / "raw" / "vwp" / "vwp_v2.1_val.csv", [_row("v1", "V", shots)])
 
 
 def _cfg(root: Path):
@@ -428,48 +476,78 @@ def _cfg(root: Path):
     )
 
 
-def test_prepare_writes_jsonl_and_one_dev_id_per_scene(tmp_path):
-    _write_split(tmp_path, "val")
+def test_prepare_val_writes_jsonl_groups_and_one_id_per_image_sequence(tmp_path):
+    # Story "4" uses the same shots as story "0" with another text: one image sequence.
+    _write_split(tmp_path, "val", extra=(_row("4", "A", [1, 2, 3], "[female0] sat ."),))
     cfg = _cfg(tmp_path)
 
     out = prepare(cfg, "val")
 
     assert out == tmp_path / "processed" / "vwp_val.jsonl"
     records = read_jsonl(out, StoryRecord)
-    assert [r.id for r in records] == ["0", "1", "2", "3"]  # the full split, not only dev ids
+    assert [r.id for r in records] == ["0", "1", "2", "3", "4"]  # the full split
     assert records[0].story == "a man smiled."
+    groups = read_groups(tmp_path / "processed" / "vwp_val_groups.tsv")
+    assert groups == {"0": "A", "1": "A", "2": "B", "3": "B", "4": "A"}
 
-    dev = read_ids(tmp_path / "splits" / "vwp_val_dev2.txt")
-    scenes = {_STORIES[i][0] for i in dev}
-    assert len(dev) == 2 and scenes == {"A", "B"}  # one story from each scene
+    test_list = tmp_path / "splits" / "vwp_val_4.txt"  # 4 different image sequences
+    ids = read_ids(test_list)
+    assert len(ids) == 4 and {"1", "2", "3"} <= set(ids) and len(set(ids) & {"0", "4"}) == 1
+    assert ids == sorted(ids, key=int)
+    assert [p.name for p in (tmp_path / "splits").iterdir()] == ["vwp_val_4.txt"]  # no dev list
 
-    first = (tmp_path / "splits" / "vwp_val_dev2.txt").read_text(encoding="utf-8")
+    first = test_list.read_text(encoding="utf-8")
     prepare(cfg, "val")  # a second run must not change the committed id list
-    assert (tmp_path / "splits" / "vwp_val_dev2.txt").read_text(encoding="utf-8") == first
+    assert test_list.read_text(encoding="utf-8") == first
 
 
-def test_prepare_train_writes_no_dev_ids(tmp_path):
+def test_prepare_train_writes_groups_and_one_dev_id_per_scene(tmp_path):
     _write_split(tmp_path, "train")
+    _write_val_csv(tmp_path, [50, 51, 52])
+    cfg = _cfg(tmp_path)
 
-    prepare(_cfg(tmp_path), "train")
+    prepare(cfg, "train")
 
-    assert not (tmp_path / "splits").exists()
+    dev_path = tmp_path / "splits" / "vwp_train_dev2.txt"
+    dev = read_ids(dev_path)
+    assert len(dev) == 2 and {_STORIES[i][0] for i in dev} == {"A", "B"}  # one per scene
+    assert read_groups(tmp_path / "processed" / "vwp_train_groups.tsv")["2"] == "B"
+
+    first = dev_path.read_text(encoding="utf-8")
+    prepare(cfg, "train")
+    assert dev_path.read_text(encoding="utf-8") == first
 
 
-def test_prepare_skips_dev_ids_when_images_are_missing(tmp_path):
+def test_prepare_train_drops_stories_that_share_a_shot_with_val(tmp_path):
+    _write_split(tmp_path, "train")
+    _write_val_csv(tmp_path, [3, 50, 51])  # shot 3 is only in train story "0"
+
+    out = prepare(_cfg(tmp_path), "train")
+
+    assert [r.id for r in read_jsonl(out, StoryRecord)] == ["1", "2", "3"]
+    assert "0" not in read_ids(tmp_path / "splits" / "vwp_train_dev2.txt")
+
+
+def test_prepare_train_fails_without_val_csv(tmp_path):
+    _write_split(tmp_path, "train")
+    with pytest.raises(FileNotFoundError, match=r"vwp_v2\.1_val\.csv"):
+        prepare(_cfg(tmp_path), "train")
+
+
+def test_prepare_skips_id_lists_when_images_are_missing(tmp_path):
     _write_split(tmp_path, "val")
     (tmp_path / "raw" / "vwp" / "images" / "val" / f"{_sid(8)}.jpg").unlink()
 
     prepare(_cfg(tmp_path), "val")
 
-    assert not (tmp_path / "splits" / "vwp_val_dev2.txt").exists()
+    assert not list((tmp_path / "splits").glob("vwp_val_*.txt"))
 
 
-def test_prepare_fails_if_committed_dev_ids_are_not_built(tmp_path):
+def test_prepare_fails_if_committed_ids_are_not_built(tmp_path):
     _write_split(tmp_path, "val")
-    dev = tmp_path / "splits" / "vwp_val_dev2.txt"
-    dev.parent.mkdir(parents=True)
-    dev.write_text("0\n99\n", encoding="utf-8")
+    committed = tmp_path / "splits" / "vwp_val_4.txt"
+    committed.parent.mkdir(parents=True)
+    committed.write_text("0\n99\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="not built here"):
         prepare(_cfg(tmp_path), "val")
