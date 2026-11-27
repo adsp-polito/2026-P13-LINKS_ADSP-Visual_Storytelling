@@ -380,8 +380,34 @@ def test_mismatch_partner_shares_no_image(story_dict):
         _ref(story_dict, "r2", "x", ["p3", "p4", "p5"]),
         _ref(story_dict, "r3", "x", ["p6", "p7", "p8"]),
     ]
-    assert [gv._partner(refs, i).id for i in range(3)] == ["r3", "r3", "r1"]
-    assert gv._partner(refs[:2], 0) is None
+    sources = [gv.distractor_sources(r) for r in refs]
+    assert [gv._partner(refs, sources, i).id for i in range(3)] == ["r3", "r3", "r1"]
+    assert gv._partner(refs[:2], sources[:2], 0) is None
+
+
+def _vwp(story_dict, sid, movie_scenes):
+    images = [
+        f"data/images/vwp/val/{m}_{scene}_0_shot_00{n}_img_0.jpg"
+        for n, (m, scene) in enumerate(movie_scenes)
+    ]
+    return _ref({**story_dict, "dataset": "vwp"}, sid, "x", images)
+
+
+def test_vwp_partner_comes_from_another_movie(story_dict):
+    refs = [
+        _vwp(story_dict, "v1", [("tt01", "0010"), ("tt01", "0010"), ("tt01", "0011")]),
+        _vwp(story_dict, "v2", [("tt01", "0020"), ("tt01", "0020"), ("tt01", "0021")]),
+        _vwp(story_dict, "v3", [("tt02", "0001"), ("tt02", "0001"), ("tt02", "0002")]),
+    ]
+    sources = [gv.distractor_sources(r) for r in refs]
+    assert sources[0] == {"tt01"}
+    assert [gv._partner(refs, sources, i).id for i in range(3)] == ["v3", "v3", "v1"]
+
+
+def test_vwp_image_without_movie_id_is_an_error(story_dict):
+    ref = _ref({**story_dict, "dataset": "vwp"}, "v1", "x", ["a.jpg", "b.jpg", "c.jpg"])
+    with pytest.raises(ValueError, match="doesn't start with a movie id"):
+        gv.distractor_sources(ref)
 
 
 def test_cli_calibrate_flag(tmp_path, monkeypatch):

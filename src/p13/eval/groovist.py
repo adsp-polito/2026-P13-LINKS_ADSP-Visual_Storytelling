@@ -32,6 +32,7 @@ import functools
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -309,9 +310,9 @@ def calibrate(cfg: ExperimentConfig) -> Path:
     For every dataset in ``data.datasets`` on ``data.split`` (the eval set: the dev subset
     if ``data.subset`` is ``dev200``), θ = mean alignment (2.5 · max cosine) of all noun
     phrases of the reference stories. Check: each reference story is also aligned with the
-    images of the next story (sorted by id) that shares no image with it; its own images
-    should score clearly higher. Writes ``<run_dir>/groovist_threshold.json`` and logs the
-    ``eval.groovist_threshold`` value to put in the config.
+    images of the next story (sorted by id) that shares no image with it (for VWP: no movie);
+    its own images should score clearly higher. Writes ``<run_dir>/groovist_threshold.json``
+    and logs the ``eval.groovist_threshold`` value to put in the config.
     """
     if cfg.data.split == "test":
         raise ValueError("calibrate GROOViST on val, never on the test split")
@@ -359,7 +360,8 @@ def calibrate_dataset(
     refs: list[StoryRecord], backend: Backend, lexicon: dict[str, float]
 ) -> dict[str, Any]:
     refs = sorted(refs, key=lambda r: r.id)
-    partners = [_partner(refs, i) for i in range(len(refs))]
+    sources = [distractor_sources(r) for r in refs]
+    partners = [_partner(refs, sources, i) for i in range(len(refs))]
     own: list[list[Phrase]] = []
     other: list[list[Phrase] | None] = []
     for ref, partner in zip(refs, partners, strict=True):
@@ -408,12 +410,30 @@ def eval_references(cfg: ExperimentConfig, dataset: str) -> list[StoryRecord]:
     return [by_id[i] for i in ids]
 
 
-def _partner(refs: list[StoryRecord], i: int) -> StoryRecord | None:
-    own = set(refs[i].images)
+VWP_MOVIE_RE = re.compile(r"^(tt\d+)_")
+
+
+def distractor_sources(ref: StoryRecord) -> set[str]:
+    """What a distractor must not share with ``ref``: its movies for VWP (from image file
+    names such as ``tt0047396_0010_0_shot_0667_img_0.jpg``), its images otherwise."""
+    if ref.dataset != "vwp":
+        return set(ref.images)
+    movies = set()
+    for path in ref.images:
+        match = VWP_MOVIE_RE.match(Path(path).name)
+        if match is None:
+            raise ValueError(
+                f"vwp story {ref.id}: image {path} doesn't start with a movie id (tt<digits>_)"
+            )
+        movies.add(match.group(1))
+    return movies
+
+
+def _partner(refs: list[StoryRecord], sources: list[set[str]], i: int) -> StoryRecord | None:
     for step in range(1, len(refs)):
-        candidate = refs[(i + step) % len(refs)]
-        if own.isdisjoint(candidate.images):
-            return candidate
+        j = (i + step) % len(refs)
+        if sources[i].isdisjoint(sources[j]):
+            return refs[j]
     return None
 
 
