@@ -10,7 +10,7 @@ from PIL import Image
 from p13.common.config import parse_config_dict
 from p13.common.jsonl import read_jsonl
 from p13.common.schema import StoryRecord
-from p13.common.subset import read_ids
+from p13.common.subset import read_groups, read_ids
 from p13.data.vist import (
     DROP_REASONS,
     RawStory,
@@ -37,10 +37,11 @@ def test_case_insensitive():
     assert rewrite_placeholders("[MALE] ran") == "a man ran"
 
 
-def _sis(story_id, photo_id, order, text):
+def _sis(story_id, photo_id, order, text, album_id="a1"):
     """One SIS annotation, wrapped in a one-element list like the real VIST files."""
     return [
         {
+            "album_id": album_id,
             "story_id": story_id,
             "photo_flickr_id": photo_id,
             "worker_arranged_photo_order": order,
@@ -56,21 +57,29 @@ def _dii(photo_id, text):
 def test_group_sis_orders_photos_and_groups_stories():
     sis = {
         "annotations": [
-            _sis("2", "b2", 1, "second ."),
-            _sis("1", "a1", 0, "first ."),
-            _sis("2", "b1", 0, "start ."),
-            _sis("1", "a2", 1, "then ."),
+            _sis("2", "b2", 1, "second .", "album2"),
+            _sis("1", "a1", 0, "first .", "album1"),
+            _sis("2", "b1", 0, "start .", "album2"),
+            _sis("1", "a2", 1, "then .", "album1"),
         ]
     }
     assert group_sis(sis) == [
-        RawStory("2", ["b1", "b2"], ["start .", "second ."]),
-        RawStory("1", ["a1", "a2"], ["first .", "then ."]),
+        RawStory("2", ["b1", "b2"], ["start .", "second ."], "album2"),
+        RawStory("1", ["a1", "a2"], ["first .", "then ."], "album1"),
     ]
 
 
 def test_group_sis_accepts_flat_annotations():
     flat = [_sis("1", "p2", 1, "bye .")[0], _sis("1", "p1", 0, "hi .")[0]]
-    assert group_sis({"annotations": flat}) == [RawStory("1", ["p1", "p2"], ["hi .", "bye ."])]
+    assert group_sis({"annotations": flat}) == [
+        RawStory("1", ["p1", "p2"], ["hi .", "bye ."], "a1")
+    ]
+
+
+def test_group_sis_rejects_story_with_two_albums():
+    sis = {"annotations": [_sis("1", "p1", 0, "hi .", "a1"), _sis("1", "p2", 1, "bye .", "a2")]}
+    with pytest.raises(ValueError, match="spans 2 albums"):
+        group_sis(sis)
 
 
 def test_per_photo_text_missing_file_returns_empty(tmp_path):
@@ -92,6 +101,7 @@ _STORIES = {
     "s2": ["s2_1", "s2_2", "s2_3"],
     "s3": ["s3_1", "s3_2", "s3_3"],
 }
+_ALBUMS = {"s1": "a1", "s2": "a1", "s3": "a2"}  # two albums: s1 + s2 share one
 
 
 def _make_image(directory: Path, photo_id: str, size=(800, 400)) -> None:
@@ -100,7 +110,7 @@ def _make_image(directory: Path, photo_id: str, size=(800, 400)) -> None:
 
 
 def _story(story_id: str, photo_ids: list[str]) -> RawStory:
-    return RawStory(story_id, photo_ids, ["[male] smiled ."] * len(photo_ids))
+    return RawStory(story_id, photo_ids, ["[male] smiled ."] * len(photo_ids), "a1")
 
 
 def test_build_records_resizes_and_rewrites(tmp_path):
@@ -176,8 +186,8 @@ def test_build_records_drops_stories_with_empty_sentences(tmp_path):
     for pid in ["e1", "e2", "e3", "f1", "f2", "f3"]:
         _make_image(raw, pid)
     stories = [
-        RawStory("E", ["e1", "e2", "e3"], ["hi .", "", "bye ."]),  # one empty sentence
-        RawStory("F", ["f1", "f2", "f3"], ["", "", ""]),  # no text at all
+        RawStory("E", ["e1", "e2", "e3"], ["hi .", "", "bye ."], "a1"),  # one empty sentence
+        RawStory("F", ["f1", "f2", "f3"], ["", "", ""], "a1"),  # no text at all
     ]
 
     records, drops = build_records(
@@ -212,7 +222,7 @@ def _write_split(root: Path, split: str) -> None:
     sis, dii = [], []
     for story_id, photo_ids in _STORIES.items():
         for order, pid in enumerate(photo_ids):
-            sis.append(_sis(story_id, pid, order, "[male] smiled ."))
+            sis.append(_sis(story_id, pid, order, "[male] smiled .", _ALBUMS[story_id]))
             dii.append(_dii(pid, "a photo ."))
             _make_image(vist / "images" / split, pid)
     sis_file = vist / "sis" / f"{split}.story-in-sequence.json"
@@ -251,6 +261,8 @@ def test_prepare_writes_full_jsonl_and_dev_ids(tmp_path):
     dev = tmp_path / "splits" / "vist_val_dev2.txt"
     assert len(read_ids(dev)) == 2
     assert set(read_ids(dev)) <= {"s1", "s2", "s3"}
+    assert sorted(_ALBUMS[i] for i in read_ids(dev)) == ["a1", "a2"]  # 2 different albums
+    assert read_groups(tmp_path / "processed" / "vist_val_groups.tsv") == _ALBUMS
 
     first = dev.read_text(encoding="utf-8")
     prepare(cfg, "val")  # a second run must not change the committed id list
@@ -267,12 +279,30 @@ def test_prepare_skips_dev_ids_when_images_are_missing(tmp_path):
     assert not (tmp_path / "splits").exists()
 
 
+def test_prepare_test_writes_one_story_per_album(tmp_path):
+    _write_split(tmp_path, "test")
+    cfg = _cfg(tmp_path)
+
+    prepare(cfg, "test")
+
+    test_list = tmp_path / "splits" / "vist_test_2.txt"  # 2 albums -> 2 stories
+    ids = read_ids(test_list)
+    assert sorted(_ALBUMS[i] for i in ids) == ["a1", "a2"]
+    assert ids == sorted(ids, key=lambda i: (len(i), i))
+    assert not (tmp_path / "splits" / "vist_test_dev2.txt").exists()
+
+    first = test_list.read_text(encoding="utf-8")
+    prepare(cfg, "test")  # a second run must not change the committed id list
+    assert test_list.read_text(encoding="utf-8") == first
+
+
 def test_prepare_train_writes_no_dev_ids(tmp_path):
     _write_split(tmp_path, "train")
 
     prepare(_cfg(tmp_path), "train")
 
     assert not (tmp_path / "splits").exists()
+    assert read_groups(tmp_path / "processed" / "vist_train_groups.tsv") == _ALBUMS
 
 
 def test_prepare_fails_if_committed_dev_ids_are_not_built(tmp_path):

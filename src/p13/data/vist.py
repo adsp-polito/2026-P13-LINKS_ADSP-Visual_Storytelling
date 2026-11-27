@@ -10,6 +10,7 @@ Expected raw layout (see ``data/README.md``)::
 Pipeline for :func:`prepare`:
 
 1. Group SIS annotations by ``story_id``; order photos by ``worker_arranged_photo_order``.
+   Every story must come from one ``album_id`` (else ``ValueError``).
 2. Drop a whole sequence if any image is missing or broken (``images.is_valid_image``).
 3. Resize images to long side ≤ ``cfg.data.max_image_side`` (``images.resize_long_side``)
    into ``data/images/vist/<split>/``.
@@ -17,8 +18,10 @@ Pipeline for :func:`prepare`:
    (:func:`rewrite_placeholders`), then undo PTB tokenisation (``text.detokenize``:
    "does n't" -> "doesn't", "home ." -> "home.").
 5. Attach per-photo DII / DIS text if those files exist.
-6. Write ``data/processed/vist_<split>.jsonl`` (``write_jsonl``) and, for val/test, the
-   dev-200 id list (``p13.common.subset``).
+6. Write ``data/processed/vist_<split>.jsonl`` (``write_jsonl``), ``vist_<split>_groups.tsv``
+   (id -> album, for the cluster bootstrap in eval) and the committed id lists, at most one
+   story per album: for val the dev list (``vist_val_dev200``), for test the final test list
+   (``vist_test_1010``). See :func:`_write_id_lists`.
 """
 
 from __future__ import annotations
@@ -34,7 +37,14 @@ from pathlib import Path
 from p13.common.config import ExperimentConfig
 from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
-from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
+from p13.common.subset import (
+    groups_path,
+    sample_ids,
+    subset_file,
+    subset_path,
+    write_groups,
+)
+from p13.data.id_lists import ensure_id_list, one_per_group
 from p13.data.images import find_image, is_valid_image, resize_long_side
 from p13.data.text import detokenize
 
@@ -81,6 +91,7 @@ class RawStory:
     story_id: str
     photo_ids: list[str]
     sentences: list[str]
+    album_id: str
 
 
 def _flatten(annotations: list) -> Iterator[dict]:
@@ -96,7 +107,8 @@ def group_sis(sis: dict) -> list[RawStory]:
     """Step 1: flat SIS annotation list → ordered stories.
 
     Stories keep the order in which their ``story_id`` first appears in the file;
-    photos inside a story are sorted by ``worker_arranged_photo_order``.
+    photos inside a story are sorted by ``worker_arranged_photo_order``. Raises
+    ``ValueError`` if the annotations of one story name more than one ``album_id``.
     """
     by_story: dict[str, list[dict]] = defaultdict(list)
     for ann in _flatten(sis["annotations"]):
@@ -105,11 +117,15 @@ def group_sis(sis: dict) -> list[RawStory]:
     stories = []
     for story_id, anns in by_story.items():
         anns.sort(key=lambda a: int(a["worker_arranged_photo_order"]))
+        albums = sorted({str(a["album_id"]) for a in anns})
+        if len(albums) != 1:
+            raise ValueError(f"VIST story {story_id} spans {len(albums)} albums: {albums}")
         stories.append(
             RawStory(
                 story_id=story_id,
                 photo_ids=[str(a["photo_flickr_id"]) for a in anns],
                 sentences=[a[TEXT_FIELD].strip() for a in anns],
+                album_id=albums[0],
             )
         )
     return stories
@@ -219,38 +235,36 @@ def build_records(
     return records, drops
 
 
-def _ensure_dev_ids(
-    cfg: ExperimentConfig, split: str, records: list[StoryRecord], drops: dict[str, int]
+def _write_id_lists(
+    cfg: ExperimentConfig,
+    split: str,
+    records: list[StoryRecord],
+    drops: dict[str, int],
+    album_of: dict[str, str],
 ) -> None:
-    """Write the committed dev-subset id list once; never overwrite an existing one.
+    """Committed id lists (seed ``cfg.experiment.seed``), at most one story per album.
 
-    Raises if an existing list names stories that were not built here, because eval
-    would then silently run on fewer stories than the committed subset.
+    * val: ``vist_val_dev<N>``, N = ``data.dev_subset_size`` stories from N different
+      albums, for prompt tuning.
+    * test: ``vist_test_<n>``, one story per album (n = 1010 on our images): the final
+      test list. The 5 stories of an album use photos of the same event; one is enough.
+    * train: no list.
     """
-    size = cfg.data.dev_subset_size
-    path = subset_path(cfg.data.splits_dir, "vist", split, size)
-    ids = {r.id for r in records}
-    if path.exists():
-        absent = [i for i in read_ids(path) if i not in ids]
-        if absent:
-            raise RuntimeError(
-                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
-                f"check the {split} images (drop counts: {drops})"
-            )
+    if split not in ("val", "test"):
         return
-    if not ids:
-        log.warning("not writing %s: no stories were built", path)
-        return
-    if drops["missing_image"]:
-        log.warning(
-            "not writing %s: %d stories lack images. Download all %s images first.",
-            path,
-            drops["missing_image"],
-            split,
-        )
-        return
-    write_ids(path, sample_ids(ids, size, cfg.experiment.seed))
-    log.info("wrote %s", path)
+    seed = cfg.experiment.seed
+    built = {r.id for r in records}
+    per_album = one_per_group(built, album_of, seed)
+    if split == "val":
+        size = cfg.data.dev_subset_size
+        if len(per_album) < size:
+            log.warning("VIST val: only %d albums, so the dev list is smaller", len(per_album))
+        path = subset_path(cfg.data.splits_dir, "vist", "val", size)
+        ensure_id_list(path, sample_ids(per_album, size, seed), built, drops)
+    else:
+        ids = sorted(per_album, key=lambda i: (len(i), i))
+        path = subset_file(cfg.data.splits_dir, "vist", "test", str(len(ids)))
+        ensure_id_list(path, ids, built, drops)
 
 
 def prepare(cfg: ExperimentConfig, split: str) -> Path:
@@ -290,6 +304,9 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
     n = write_jsonl(out_path, records)
     log.info("VIST %s: wrote %d records to %s", split, n, out_path)
 
-    if split in ("val", "test"):
-        _ensure_dev_ids(cfg, split, records, drops)
+    album_of = {s.story_id: s.album_id for s in stories}
+    write_groups(
+        groups_path(cfg.data.jsonl_dir, "vist", split), {r.id: album_of[r.id] for r in records}
+    )
+    _write_id_lists(cfg, split, records, drops, album_of)
     return out_path
