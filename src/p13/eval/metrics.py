@@ -74,7 +74,24 @@ def groovist(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> S
     """
     from p13.eval import groovist as gv
 
-    return gv.score(gens, refs, cfg)
+    return gv.score("groovist", gens, refs, cfg)
+
+
+def groovist_raw(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
+    """GROOViST before tanh: mean of weight · penalised alignment over the noun phrases.
+    Unbounded; shows differences that tanh squeezes together near 1."""
+    from p13.eval import groovist as gv
+
+    return gv.score("groovist_raw", gens, refs, cfg)
+
+
+def groovist_grounded_share(
+    gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig
+) -> Scores:
+    """Share of the story's noun phrases whose alignment reaches θ, in [0, 1]."""
+    from p13.eval import groovist as gv
+
+    return gv.score("groovist_grounded_share", gens, refs, cfg)
 
 
 def rovist_c(gens: list[GeneratedStory], refs: Refs, cfg: ExperimentConfig) -> Scores:
@@ -529,6 +546,8 @@ def _write_csv(path: Path, columns: list[str], rows: list[dict[str, object]]) ->
 
 METRICS: dict[str, Callable[[list[GeneratedStory], Refs, ExperimentConfig], Scores]] = {
     "groovist": groovist,
+    "groovist_raw": groovist_raw,
+    "groovist_grounded_share": groovist_grounded_share,
     "rovist_c": rovist_c,
     "rovist_nr": rovist_nr,
     "halluc_any": halluc_any,

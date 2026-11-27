@@ -109,6 +109,8 @@ class EvalSection:
         default_factory=lambda: [
             # headline
             "groovist",
+            "groovist_raw",
+            "groovist_grounded_share",
             "rovist_c",
             "rovist_nr",
             "dhm_g",

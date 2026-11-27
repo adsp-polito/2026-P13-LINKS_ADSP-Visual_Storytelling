@@ -16,6 +16,10 @@ Clean reimplementation of https://github.com/akskuchi/groovist with our own regi
 6. Story score = tanh(mean over phrases of weight · penalised alignment), in (−1, 1).
    A story without noun phrases gets no score.
 
+Two extra columns from the same phrases: ``groovist_raw`` (the mean before tanh; tanh squeezes
+well-grounded stories together near 1) and ``groovist_grounded_share`` (share of phrases whose
+alignment reaches θ).
+
 Every phrase of every scored story is also written to ``<run_dir>/groovist_phrases.jsonl``
 for error analysis.
 """
@@ -114,11 +118,23 @@ def penalise(alignment: float, theta: float) -> float:
     return alignment if alignment >= theta else alignment - theta
 
 
-def story_score(phrases: list[Phrase], theta: float) -> float:
+def raw_score(phrases: list[Phrase], theta: float) -> float:
+    """Mean of weight · penalised alignment over the phrases (GROOViST before tanh)."""
     if not phrases:
         return math.nan
     values = [p.weight * penalise(p.alignment, theta) for p in phrases]
-    return math.tanh(sum(values) / len(values))
+    return sum(values) / len(values)
+
+
+def story_score(phrases: list[Phrase], theta: float) -> float:
+    return math.tanh(raw_score(phrases, theta))
+
+
+def grounded_share(phrases: list[Phrase], theta: float) -> float:
+    """Share of phrases whose alignment reaches θ."""
+    if not phrases:
+        return math.nan
+    return sum(p.alignment >= theta for p in phrases) / len(phrases)
 
 
 def story_phrases(
@@ -149,9 +165,30 @@ def story_phrases_on(
     return out
 
 
+COLUMNS: dict[str, Any] = {
+    "groovist": story_score,
+    "groovist_raw": raw_score,
+    "groovist_grounded_share": grounded_share,
+}
+
+_last: tuple[list[GeneratedStory], ExperimentConfig, dict[str, dict[Any, float]]] | None = None
+
+
 def score(
-    gens: list[GeneratedStory], refs: dict[Any, StoryRecord], cfg: ExperimentConfig
+    name: str, gens: list[GeneratedStory], refs: dict[Any, StoryRecord], cfg: ExperimentConfig
 ) -> dict[Any, float]:
+    """One of :data:`COLUMNS` for a group. Within one ``evaluate`` run every metric of a group
+    gets the same ``gens`` list, so the phrases are computed once for all columns; a new run
+    reads the files again and recomputes."""
+    global _last
+    if _last is None or _last[0] is not gens or _last[1] is not cfg:
+        _last = (gens, cfg, _score_group(gens, refs, cfg))
+    return _last[2][name]
+
+
+def _score_group(
+    gens: list[GeneratedStory], refs: dict[Any, StoryRecord], cfg: ExperimentConfig
+) -> dict[str, dict[Any, float]]:
     missing = sorted({g.dataset for g in gens} - set(cfg.eval.groovist_threshold))
     if missing:
         raise ValueError(
@@ -160,17 +197,18 @@ def score(
         )
     backend = load_backend(cfg)
     lexicon = load_lexicon(cfg.eval.concreteness_file)
-    scores: dict[Any, float] = {}
+    out: dict[str, dict[Any, float]] = {name: {} for name in COLUMNS}
     rows: list[dict[str, Any]] = []
     for g in gens:
         theta = cfg.eval.groovist_threshold[g.dataset]
         phrases = story_phrases(g.story, refs[g.key].images, backend, lexicon)
-        value = story_score(phrases, theta)
-        if not math.isnan(value):
-            scores[g.key] = value
+        for name, fn in COLUMNS.items():
+            value = fn(phrases, theta)
+            if not math.isnan(value):
+                out[name][g.key] = value
         rows.extend(phrase_rows(g, phrases, theta))
     append_phrase_rows(cfg.run_dir / PHRASES_FILE, rows)
-    return scores
+    return out
 
 
 def phrase_rows(g: GeneratedStory, phrases: list[Phrase], theta: float) -> list[dict[str, Any]]:

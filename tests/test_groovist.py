@@ -27,11 +27,13 @@ class FakeBackend:
     def __init__(self, chunks, texts, regions):
         self.chunks, self.texts, self.regions = chunks, texts, regions
         self.region_calls = []
+        self.text_calls = 0
 
     def noun_chunks(self, text):
         return self.chunks[text]
 
     def embed_texts(self, texts):
+        self.text_calls += 1
         return np.array([self.texts[t] for t in texts], dtype=float)
 
     def embed_regions(self, image_path):
@@ -90,6 +92,15 @@ def test_story_score_is_tanh_of_weighted_mean():
     assert -1 < gv.story_score(phrases, THETA) < 1
 
 
+def test_raw_score_is_the_mean_before_tanh_and_grounded_share_counts_theta():
+    phrases = [gv.Phrase("a", 2.0, 0.8), gv.Phrase("b", 4.0, 0.5), gv.Phrase("c", 1.0, THETA)]
+    raw = (2.0 * 0.8 + 4.0 * (0.5 - THETA) + 1.0 * THETA) / 3
+    assert gv.raw_score(phrases, THETA) == pytest.approx(raw)
+    assert gv.story_score(phrases, THETA) == pytest.approx(math.tanh(raw))
+    assert gv.grounded_share(phrases, THETA) == pytest.approx(2 / 3)
+    assert math.isnan(gv.raw_score([], THETA)) and math.isnan(gv.grounded_share([], THETA))
+
+
 def test_story_without_phrases_gets_no_score():
     assert math.isnan(gv.story_score([], THETA))
 
@@ -133,7 +144,15 @@ def test_load_lexicon_reads_word_and_mean(tmp_path):
         gv.load_lexicon(str(tmp_path / "missing.tsv"))
 
 
-def _setup(tmp_path, story_dict, generated_dict, monkeypatch, stories, threshold="{vist: 0.6}"):
+def _setup(
+    tmp_path,
+    story_dict,
+    generated_dict,
+    monkeypatch,
+    stories,
+    threshold="{vist: 0.6}",
+    metric_names="groovist",
+):
     write_jsonl(
         tmp_path / "processed" / "vist_val.jsonl",
         [StoryRecord.model_validate({**story_dict, "id": i}) for i in stories],
@@ -156,7 +175,7 @@ def _setup(tmp_path, story_dict, generated_dict, monkeypatch, stories, threshold
         [
             f"data.jsonl_dir={tmp_path / 'processed'}",
             f"output.dir={tmp_path / 'outputs'}",
-            "eval.metrics=[groovist]",
+            f"eval.metrics=[{metric_names}]",
             f"eval.groovist_threshold={threshold}",
         ],
     )
@@ -326,3 +345,24 @@ def test_cli_calibrate_flag(tmp_path, monkeypatch):
     for extra in (["--with-human"], ["--stories", "x.jsonl"], []):
         with pytest.raises(SystemExit):
             cli.eval_main([*base, "--calibrate-groovist", *extra] if extra else base)
+
+
+def test_evaluate_writes_all_groovist_columns_from_one_model_pass(
+    tmp_path, story_dict, generated_dict, monkeypatch
+):
+    cfg, gens, backend = _setup(
+        tmp_path,
+        story_dict,
+        generated_dict,
+        monkeypatch,
+        {"s1": "A dog.", "s2": "It ran."},
+        metric_names="groovist,groovist_raw,groovist_grounded_share",
+    )
+    with evaluate(cfg, [gens]).open(encoding="utf-8", newline="") as f:
+        rows = {r["id"]: r for r in csv.DictReader(f)}
+    assert float(rows["s1"]["groovist_raw"]) == pytest.approx(5.0 * 0.8)
+    assert float(rows["s1"]["groovist"]) == pytest.approx(math.tanh(4.0))
+    assert float(rows["s1"]["groovist_grounded_share"]) == 1.0
+    assert rows["s2"]["groovist_raw"] == rows["s2"]["groovist_grounded_share"] == ""
+    assert backend.text_calls == 1
+    assert len(_phrase_rows(cfg)) == 1
