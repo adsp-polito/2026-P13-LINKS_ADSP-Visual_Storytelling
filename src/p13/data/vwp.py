@@ -22,8 +22,10 @@ Pipeline for :func:`prepare`:
    if it repeats an earlier story, if it has a bad number of images, no text, or any
    image that is missing or cannot be decoded (``drop_counts`` says why).
 4. Resize images to long side ≤ ``cfg.data.max_image_side`` into ``data/images/vwp/<split>/``.
-5. Write ``data/processed/vwp_<split>.jsonl`` and, for val, the dev-200 id list with
-   at most one story per scene.
+5. Write ``data/processed/vwp_<split>.jsonl``, ``vwp_<split>_groups.tsv`` (id -> scene,
+   for the cluster bootstrap in eval) and the committed id lists: for train the dev list
+   (``vwp_train_dev200``, at most one story per scene), for val the test list
+   (``vwp_val_791``, one story per image sequence). See :func:`_write_id_lists`.
 
 The test split is blind (the CSV has images but no stories), so :func:`prepare` refuses it.
 """
@@ -43,7 +45,15 @@ from pathlib import Path
 from p13.common.config import ExperimentConfig
 from p13.common.jsonl import write_jsonl
 from p13.common.schema import MAX_IMAGES, MIN_IMAGES, StoryRecord
-from p13.common.subset import read_ids, sample_ids, subset_path, write_ids
+from p13.common.subset import (
+    groups_path,
+    read_ids,
+    sample_ids,
+    subset_file,
+    subset_path,
+    write_groups,
+    write_ids,
+)
 from p13.data.images import find_image, is_valid_image, resize_long_side
 from p13.data.text import detokenize
 
@@ -433,55 +443,72 @@ def build_records(
     return records, drops
 
 
-def _one_per_scene(ids: set[str], scene_of: dict[str, str], seed: int) -> list[str]:
-    """One random kept story per scene (scenes and ids sorted first, so it is deterministic)."""
-    by_scene: dict[str, list[str]] = defaultdict(list)
+def _one_per_group(ids: set[str], group_of: dict[str, str], seed: int) -> list[str]:
+    """One random kept story per group (groups and ids sorted first, so it is deterministic)."""
+    by_group: dict[str, list[str]] = defaultdict(list)
     for i in sorted(ids):
-        by_scene[scene_of[i]].append(i)
+        by_group[group_of[i]].append(i)
     rng = random.Random(seed)
-    return [rng.choice(by_scene[scene]) for scene in sorted(by_scene)]
+    return [rng.choice(by_group[g]) for g in sorted(by_group)]
 
 
-def _ensure_dev_ids(
+def _ensure_id_list(path: Path, ids: list[str], built: set[str], drops: dict[str, int]) -> None:
+    """Write the committed id list ``path`` once; never overwrite an existing one.
+
+    Raises if an existing list names stories that were not built here, because eval would
+    then silently run on fewer stories than the committed list. Writes nothing if no story
+    was built or if images are missing (the download is incomplete).
+    """
+    if path.exists():
+        absent = [i for i in read_ids(path) if i not in built]
+        if absent:
+            raise RuntimeError(
+                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
+                f"check the images (drop counts: {drops})"
+            )
+        return
+    if not built:
+        log.warning("not writing %s: no stories were built", path)
+        return
+    if drops["missing_image"]:
+        log.warning(
+            "not writing %s: %d stories lack images. Download all images first.",
+            path,
+            drops["missing_image"],
+        )
+        return
+    write_ids(path, ids)
+    log.info("wrote %s (%d ids)", path, len(ids))
+
+
+def _write_id_lists(
     cfg: ExperimentConfig,
     split: str,
     records: list[StoryRecord],
     drops: dict[str, int],
     scene_of: dict[str, str],
 ) -> None:
-    """Write the committed dev-subset id list once; never overwrite an existing one.
+    """Committed id lists (seed ``cfg.experiment.seed``).
 
-    The list holds at most one story per scene, so no scene is evaluated twice.
-    Raises if an existing list names stories that were not built here, because eval
-    would then silently run on fewer stories than the committed subset.
+    * train: ``vwp_train_dev<N>``, N = ``data.dev_subset_size`` stories, at most one per
+      scene, for prompt tuning (VWP val is our test set, so dev comes from train).
+    * val: ``vwp_val_<n>``, one story per image sequence (n = 791 on VWP v2.1): the final
+      test list. Several writers often told a story about the same shots; one is enough.
     """
-    size = cfg.data.dev_subset_size
-    path = subset_path(cfg.data.splits_dir, "vwp", split, size)
-    ids = {r.id for r in records}
-    if path.exists():
-        absent = [i for i in read_ids(path) if i not in ids]
-        if absent:
-            raise RuntimeError(
-                f"{path} lists {len(absent)} ids that were not built here (e.g. {absent[0]}); "
-                f"check the {split} images (drop counts: {drops})"
-            )
-        return
-    if not ids:
-        log.warning("not writing %s: no stories were built", path)
-        return
-    if drops["missing_image"]:
-        log.warning(
-            "not writing %s: %d stories lack images. Download all %s images first.",
-            path,
-            drops["missing_image"],
-            split,
-        )
-        return
-    picked = _one_per_scene(ids, scene_of, cfg.experiment.seed)
-    if len(picked) < size:
-        log.warning("%s: only %d scenes, so the list has %d ids", path, len(picked), len(picked))
-    write_ids(path, sample_ids(picked, size, cfg.experiment.seed))
-    log.info("wrote %s", path)
+    seed = cfg.experiment.seed
+    built = {r.id for r in records}
+    if split == "train":
+        size = cfg.data.dev_subset_size
+        per_scene = _one_per_group(built, scene_of, seed)
+        if len(per_scene) < size:
+            log.warning("VWP train: only %d scenes, so the dev list is smaller", len(per_scene))
+        path = subset_path(cfg.data.splits_dir, "vwp", "train", size)
+        _ensure_id_list(path, sample_ids(per_scene, size, seed), built, drops)
+    else:
+        sequence_of = {r.id: "\n".join(r.images) for r in records}
+        ids = sorted(_one_per_group(built, sequence_of, seed), key=lambda i: (len(i), i))
+        path = subset_file(cfg.data.splits_dir, "vwp", "val", str(len(ids)))
+        _ensure_id_list(path, ids, built, drops)
 
 
 def prepare(cfg: ExperimentConfig, split: str) -> Path:
@@ -531,6 +558,9 @@ def prepare(cfg: ExperimentConfig, split: str) -> Path:
     n = write_jsonl(out_path, records)
     log.info("VWP %s: wrote %d records to %s", split, n, out_path)
 
-    if split == "val":
-        _ensure_dev_ids(cfg, split, records, drops, {s.story_id: s.scene_id for s in stories})
+    scene_of = {s.story_id: s.scene_id for s in stories}
+    write_groups(
+        groups_path(cfg.data.jsonl_dir, "vwp", split), {r.id: scene_of[r.id] for r in records}
+    )
+    _write_id_lists(cfg, split, records, drops, scene_of)
     return out_path

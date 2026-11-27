@@ -1,5 +1,7 @@
-# E0 – zero-shot baseline (adapter OFF). Runs P0 and P1 on the dev-200 subset.
-# Full validation: --set data.subset=full
+# E0 – zero-shot baseline (adapter OFF). Default: P0 and P1 on VIST val dev-200.
+# One run per dataset and split (id lists: data/README.md), e.g. VWP dev (from train):
+#   --set "data.datasets=[vwp]" --set data.split=train --set data.subset=dev200
+# Full split: --set data.subset=full
 experiment:
   id: E0
   name: zeroshot_2b
@@ -12,7 +14,7 @@ model:
   adapter: null                # zero-shot: no adapter
 
 data:
-  datasets: [vist, vwp, aesop]
+  datasets: [vist]             # one dataset per run: see the header
   split: val
   max_image_side: 448
   subset: dev200

@@ -68,6 +68,27 @@ def load_subset_records(cfg: ExperimentConfig, dataset: str) -> list[StoryRecord
     return [by_id[i] for i in want]
 
 
+def groups_path(jsonl_dir: str | Path, dataset: str, split: str) -> Path:
+    """``<jsonl_dir>/<dataset>_<split>_groups.tsv``: story id -> group (VWP scene, VIST album)."""
+    return Path(jsonl_dir) / f"{dataset}_{split}_groups.tsv"
+
+
+def write_groups(path: str | Path, groups: dict[str, str]) -> None:
+    """Write ``id<TAB>group`` lines (after an ``id<TAB>group`` header), in the given order."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["id\tgroup\n", *(f"{i}\t{g}\n" for i, g in groups.items())]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def read_groups(path: str | Path) -> dict[str, str]:
+    """Inverse of :func:`write_groups`."""
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "id\tgroup":
+        raise ValueError(f"{path}: expected an 'id<TAB>group' header")
+    return dict(line.split("\t", 1) for line in lines[1:] if line)
+
+
 def write_ids(path: str | Path, ids: list[str]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

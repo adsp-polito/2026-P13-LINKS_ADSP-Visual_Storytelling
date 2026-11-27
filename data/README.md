@@ -6,7 +6,7 @@ Only scripts, documentation and **ID lists** are committed here. Everything else
 data/raw/<dataset>/        original downloads (annotations + images)     – gitignored
 data/images/<dataset>/     resized images (long side ≤ 448 px)           – gitignored
 data/processed/            unified JSONL: <dataset>_<split>.jsonl        – gitignored
-data/splits/               dev-200 id lists: <dataset>_<split>_dev200.txt – COMMITTED
+data/splits/               id lists: <dataset>_<split>_<tag>.txt          – COMMITTED
 ```
 
 ## Datasets
@@ -31,10 +31,28 @@ SIS = stories of images in sequence (our training target).
   "another man", "the first man" …; character names the anonymiser missed → "a person".
 - Each story has its own shots (writers picked different shots of the same scene), so the
   images of a record are that row's links, in order.
-- Dropped: rows whose links do not match `img_id_list` and the text segments (mostly the
-  CSV lost the 10th link; 15 in val, 373 in train), duplicates with the same images and the
-  same anonymised text (2,294 in train), and the usual length / missing / broken checks. The test CSV is blind (no stories): VWP is val-only for eval.
-- dev-200 (val): at most one story per scene.
+- Dropped: train stories that use a shot that is also in val (`val_overlap`, checked first:
+  17 train stories; same movie + shot number, from the val CSV, so training never sees a
+  val/test frame); rows whose links do not match `img_id_list` and the text segments
+  (mostly the CSV lost the 10th link; 15 in val, 373 in train before `val_overlap`),
+  duplicates with the same images and the same anonymised text (2,294 in train before
+  `val_overlap`), and the usual length / missing / broken checks. The test CSV is blind (no
+  stories): VWP val is our VWP test set, and VWP dev comes from train.
+- Id lists: `vwp_train_dev200` (at most one story per scene) and `vwp_val_791` (one story
+  per image sequence; several writers often wrote about the same shots).
+
+## Id lists and groups
+
+`data.subset` picks the stories: `full` = all of them, any other tag = the ids in
+`data/splits/<dataset>_<split>_<tag>.txt`. Run generation once per dataset and split (see
+the E0 configs). `p13-prepare` writes each list once (seed 42) and never overwrites it.
+
+| Dataset | Dev (prompt tuning) | Final test |
+|---|---|---|
+| VWP | `vwp_train_dev200` | `vwp_val_791` |
+
+`p13-prepare` also writes `data/processed/<dataset>_<split>_groups.tsv` (`id`, `group`; the
+VWP scene) for the cluster bootstrap in eval. It is gitignored and shared with the JSONL.
 
 ## Licensing / GDPR
 
